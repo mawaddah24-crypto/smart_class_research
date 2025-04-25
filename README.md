@@ -127,7 +127,7 @@ SE Block / DSE       SE Block / DSE
 
 ## 🧪 Dataset dan Evaluasi
 
-Model dilatih dan diuji menggunakan:
+Model dilatih dan diuji menggunakan dan simpan pada folder dataset:
 
 - 📁 RAF-DB
 - 📁 FER2013
