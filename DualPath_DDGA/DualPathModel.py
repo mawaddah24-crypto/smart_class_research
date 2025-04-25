@@ -113,11 +113,12 @@ class DualPath_PartialAttentionModif(nn.Module):
     def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', pretrained=True, in_channels=3):
         super(DualPath_PartialAttentionModif, self).__init__()
         
-        self.partial_attention = PartialAttentionMasking(masking_ratio=0.5, strategy="topk")
+       
         # Backbone: EfficientViT pretrained
         self.backbone = create_model(backbone_name, pretrained=pretrained, features_only=True, in_chans=in_channels)
         self.feature_dim = self.backbone.feature_info[-1]['num_chs']  # usually 128
-
+        
+        self.partial_attention = PartialAttentionMasking(masking_ratio=0.5, strategy="topk")
         # Local pathway
         self.pra = PRA_MultiheadAttention(embed_dim=self.feature_dim)
         self.se_local = DSE_Local(in_channels=self.feature_dim, out_channels=self.feature_dim)
