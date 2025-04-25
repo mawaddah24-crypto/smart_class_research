@@ -13,7 +13,6 @@ __pycache__/
 *.DS_Store
 
 # Dataset & weights
-dataset/
 weights/
 *.rar
 *.zip
