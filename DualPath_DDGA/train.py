@@ -12,7 +12,10 @@ from torchvision import transforms,datasets
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
-from DualPathModel import DualPath_Base_Partial, DualPath_Baseline, DualPath_PartialAttentionModif
+from DualPathModel import (DualPath_Base_Partial, 
+                           DualPath_Baseline, 
+                           DualPath_PartialAttentionModif,
+                           DualPath_PartialAttentionSAP)
 from loaders import load_pretrained_backbone
 #from FERLandmarkDataset import FERLandmarkCachedDataset  # Sesuaikan ini
 from FocalLoss import FocalLoss
@@ -72,6 +75,8 @@ def train(args):
         model = DualPath_Base_Partial(num_classes=args.num_classes, pretrained=True)
     elif args.model == "partialmodif":
         model = DualPath_PartialAttentionModif(num_classes=args.num_classes, pretrained=True)
+    elif args.model == "semantic":
+        model = DualPath_PartialAttentionSAP(num_classes=args.num_classes, pretrained=True)
     else:
         raise ValueError(f"Unknown model type {args.model}")
 
@@ -214,12 +219,15 @@ def train(args):
 
         topk_checkpoints.append((val_acc, model_filename))
         topk_checkpoints = sorted(topk_checkpoints, key=lambda x: x[0], reverse=True)[:topk]
-        # Jika sudah lebih dari K, hapus checkpoint paling bawah
-        if len(topk_checkpoints) > topk:
-            _, to_delete = topk_checkpoints.pop()  # Pop yang paling rendah
-            if os.path.exists(to_delete):
-                os.remove(to_delete)
-                print(f"🗑️ Deleted low-performing checkpoint: {os.path.basename(to_delete)}")
+        
+        # 🔥 Hapus semua file di folder yang tidak masuk top-K
+        all_files = set(f for _, f in topk_checkpoints)
+        for file in os.listdir(args.output_dir):
+            if file.endswith(".pt"):
+                file_path = os.path.join(args.output_dir, file)
+                if file_path not in all_files and os.path.exists(file_path):
+                    os.remove(file_path)
+                    print(f"🗑️ Deleted checkpoint outside top-{topk}: {file}")
                 
         torch.save({
             'epoch': epoch + 1,
@@ -271,7 +279,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--early_stop", type=int, default=10)
-    parser.add_argument('--model', type=str, default='baseline', choices=['baseline','partialmodif','partial'])
+    parser.add_argument('--model', type=str, default='baseline', choices=['baseline','partialmodif','partial','semantic'])
     parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sgd'])
     args = parser.parse_args()
 

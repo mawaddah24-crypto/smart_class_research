@@ -24,5 +24,12 @@ echo 🔥 Training DualPath_PartialAttention_Modified on FER2013
 python train.py --model partialmodif --dataset FER2013 --output_dir logs/partialmodif_fer2013
 
 echo ==========================================================
+echo 🔥 Training DualPath_PartialAttention_SAP on RAF-DB
+python train.py --model semantic --dataset RAF-DB --output_dir logs/semantic_rafdb
+
+echo ==========================================================
+echo 🔥 Training DualPath_PartialAttention_SAP on FER2013
+python train.py --model semantic --dataset FER2013 --output_dir logs/semantic_fer2013
+echo ==========================================================
 echo ✅ All Trainings Completed Successfully!
 pause

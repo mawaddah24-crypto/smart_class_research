@@ -244,8 +244,8 @@ class DualPath_PartialAttentionSAP(nn.Module):
         self.app = AGAPP(in_channels=self.feature_dim, out_channels=self.feature_dim)
 
         # Dynamic Spatial Excitation (Local & Global)
-        self.dse_local = DSE_Local(in_channels=self.feature_dim)
-        self.dse_global = DSE_Global(in_channels=self.feature_dim)
+        self.se_local = DSE_Local(in_channels=self.feature_dim, out_channels=self.feature_dim)
+        self.se_global = DSE_Global(in_channels=self.feature_dim, out_channels=self.feature_dim)
 
         # Dual Dynamic Gated Attention
         self.ddga = DDGA(in_channels=self.feature_dim)
