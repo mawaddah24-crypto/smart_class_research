@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment & IDE
+.env
+*.log
+.vscode/
+*.DS_Store
+
+# Dataset & weights
+dataset/
+weights/
+*.rar
+*.zip
+*.tar
+*.7z
+
+# Checkpoints
+*.pt
+*.ckpt
+*.pth
+
+# Training logs
+logs/
+runs/
+*.csv
