@@ -8,7 +8,7 @@ from module import (
     DDGA,AGAPP, 
     SEBlock_Enhanced, 
     PRA_MultiheadAttention,
-    PRA, SE_Global, SE_Local, SE_Block, AdaptivePatchPooling)
+    PRA, SE_Global, SE_Local, SE_Block, AdaptivePatchPooling, SemanticAwarePooling)
                     
 
 class DualPath_Baseline(nn.Module):
@@ -73,11 +73,11 @@ class DualPath_Baseline_DSE(nn.Module):
 
         # Local pathway
         self.pra = PRA(embed_dim=self.feature_dim)
-        self.se_local = SE_Local(in_channels=self.feature_dim)
+        self.se_local = DSE_Local(in_channels=self.feature_dim)
 
         # Global pathway
         self.app = AdaptivePatchPooling(dim=self.feature_dim)
-        self.se_global = SE_Global(in_channels=self.feature_dim)
+        self.se_global = DSE_Global(in_channels=self.feature_dim)
 
         # Dynamic attention to fuse both pathways
         self.ddga = DDGA(dim=self.feature_dim)
@@ -224,5 +224,61 @@ class DualPath_Base_Partial(nn.Module):
         # === Classification Head ===
         pooled = self.global_pool(fused_feat).view(B, C)  # [B, C]
         out = self.classifier(self.dropout(pooled))       # [B, num_classes]
+
+        return out
+
+class DualPath_PartialAttentionSAP(nn.Module):
+    def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', pretrained=True, in_channels=3):
+        super(DualPath_PartialAttentionSAP, self).__init__()
+
+        # Backbone: EfficientViT pretrained
+        self.backbone = create_model(backbone_name, pretrained=pretrained, features_only=True, in_chans=in_channels)
+        self.feature_dim = self.backbone.feature_info[-1]['num_chs']  # usually 128
+
+
+        # Partial Attention Masking
+        self.partial_attention = PartialAttentionMasking(masking_ratio=0.5, strategy="topk")  # atau SAPA jika sudah
+
+        # Local and Global Pathways
+        self.pra = PRA(in_channels=self.feature_dim, out_channels=self.feature_dim)
+        self.app = AGAPP(in_channels=self.feature_dim, out_channels=self.feature_dim)
+
+        # Dynamic Spatial Excitation (Local & Global)
+        self.dse_local = DSE_Local(in_channels=self.feature_dim)
+        self.dse_global = DSE_Global(in_channels=self.feature_dim)
+
+        # Dual Dynamic Gated Attention
+        self.ddga = DDGA(in_channels=self.feature_dim)
+
+        # Semantic-Aware Pooling (NEW)
+        self.semantic_pool = SemanticAwarePooling(in_channels=self.feature_dim)
+
+        # Dropout and Classifier
+        self.dropout = nn.Dropout(p=0.5)
+        self.classifier = nn.Linear(self.feature_dim, num_classes)
+
+    def forward(self, x):
+        # Backbone
+        feat = self.backbone(x)[-1]  # Feature map [B, C, H, W]
+
+        # Partial Attention
+        feat = self.partial_attention(feat)
+
+        # Local Path
+        pra_feat = self.pra(feat).transpose(1, 2).view(feat.shape)
+        pra_feat = self.dse_local(pra_feat)
+
+        # Global Path
+        app_feat = self.app(feat)
+        app_feat = self.dse_global(app_feat)
+
+        # Fusion
+        fused_feat = self.ddga(pra_feat, app_feat)
+
+        # Semantic-Aware Pooling
+        pooled = self.semantic_pool(fused_feat)
+
+        # Classification
+        out = self.classifier(self.dropout(pooled))
 
         return out

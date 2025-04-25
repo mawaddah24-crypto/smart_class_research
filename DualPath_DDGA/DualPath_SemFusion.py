@@ -12,7 +12,8 @@ from module import (
 )
 
 class DualPath_SemFusion(nn.Module):
-    def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', pretrained=True, in_channels=3, masking_ratio=0.5):
+    def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', pretrained=True, 
+                 in_channels=3, masking_ratio=0.5):
         super(DualPath_SemFusion, self).__init__()
         
         # === Semantic-Aware Partial Attention ===
