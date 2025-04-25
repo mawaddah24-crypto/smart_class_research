@@ -1,8 +1,14 @@
 import torch
 import torch.nn as nn
 from timm import create_model
-from module import PartialAttentionMasking, DSE_Global, DSE_Local, DDGA,AGAPP, SEBlock_Enhanced, PRA_MultiheadAttention
-from module import PRA, SE_Global, SE_Local, SE_Block, SemanticAwarePooling, AdaptivePatchPooling
+from module import (
+    PartialAttentionMasking, 
+    DSE_Global, 
+    DSE_Local, 
+    DDGA,AGAPP, 
+    SEBlock_Enhanced, 
+    PRA_MultiheadAttention,
+    PRA, SE_Global, SE_Local, SE_Block, AdaptivePatchPooling)
                     
 
 class DualPath_Baseline(nn.Module):

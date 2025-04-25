@@ -2,6 +2,116 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# === Modified PartialAttentionMasking in SemanticAwarePartialAttention ===
+class SemanticAwarePartialAttention(nn.Module):
+    def __init__(self, masking_ratio=0.5, topk_semantic=True):
+        super(SemanticAwarePartialAttention, self).__init__()
+        self.masking_ratio = masking_ratio
+        self.topk_semantic = topk_semantic
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        """
+        x: [B, C, H, W]
+        """
+        B, C, H, W = x.shape
+        feat = x.view(B, C, -1)  # [B, C, HW]
+        feat_norm = F.normalize(feat, dim=1)  # normalize per channel
+
+        # Calculate semantic correlation matrix
+        semantic_corr = torch.bmm(feat_norm.transpose(1, 2), feat_norm)  # [B, HW, HW]
+
+        # Aggregate semantic importance
+        semantic_score = semantic_corr.mean(dim=-1)  # [B, HW]
+
+        # Select Top-K important patches
+        k = int(self.masking_ratio * H * W)
+
+        if self.topk_semantic:
+            topk_indices = torch.topk(semantic_score, k=k, dim=-1, largest=True)[1]
+        else:
+            topk_indices = torch.topk(semantic_score, k=k, dim=-1, largest=False)[1]
+
+        # Create mask
+        mask = torch.zeros_like(semantic_score)
+        mask.scatter_(1, topk_indices, 1)
+        mask = mask.unsqueeze(1)  # [B, 1, HW]
+
+        # Apply mask
+        feat = feat * mask  # [B, C, HW]
+        feat = feat.view(B, C, H, W)
+
+        return feat
+
+class DynamicGridDSE(nn.Module):
+    def __init__(self, in_channels, out_channels, grid_size=2):
+        super(DynamicGridDSE, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.grid_size = grid_size
+        
+        self.fc1 = nn.Conv2d(in_channels, out_channels // 4, kernel_size=1)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc2 = nn.Conv2d(out_channels // 4, out_channels, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        """
+        x: [B, C, H, W]
+        """
+        B, C, H, W = x.shape
+        gh, gw = self.grid_size, self.grid_size
+
+        # Adaptive average pooling based on grid
+        pooled = F.adaptive_avg_pool2d(x, output_size=(gh, gw))  # [B, C, gh, gw]
+        pooled = self.fc1(pooled)
+        pooled = self.relu(pooled)
+        pooled = self.fc2(pooled)
+        pooled = self.sigmoid(pooled)
+
+        # Expand to original resolution
+        pooled = F.interpolate(pooled, size=(H, W), mode='bilinear', align_corners=False)
+
+        # Reweight original feature
+        out = x * pooled
+        return out
+
+class CrossLevelDualGatedAttention(nn.Module):
+    def __init__(self, dim):
+        super(CrossLevelDualGatedAttention, self).__init__()
+        self.local_proj = nn.Conv2d(dim, dim, kernel_size=1)
+        self.global_proj = nn.Conv2d(dim, dim, kernel_size=1)
+        self.cross_gate = nn.Sequential(
+            nn.Conv2d(dim * 2, dim, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(dim, dim, kernel_size=1),
+            nn.Sigmoid()
+        )
+        self.fusion_proj = nn.Conv2d(dim * 2, dim, kernel_size=1)
+
+    def forward(self, local_feat, global_feat):
+        """
+        local_feat: [B, C, H, W]
+        global_feat: [B, C, H, W]
+        """
+        local_proj = self.local_proj(local_feat)
+        global_proj = self.global_proj(global_feat)
+
+        # Cross-level gating
+        concat_feat = torch.cat([local_proj, global_proj], dim=1)
+        gate = self.cross_gate(concat_feat)
+
+        # Apply gate
+        gated_local = local_proj * gate
+        gated_global = global_proj * (1 - gate)
+
+        # Fuse
+        fused_feat = torch.cat([gated_local, gated_global], dim=1)
+        out = self.fusion_proj(fused_feat)
+
+        return out
+
+# === PartialAttentionMasking ===
 class PartialAttentionMasking(nn.Module):
     def __init__(self, masking_ratio=0.5, strategy="topk"):
         """
@@ -160,7 +270,8 @@ class SemanticAwarePooling(nn.Module):
 
     def forward(self, x):
         weights = torch.sigmoid(self.conv(x))
-        return (x * weights).sum(dim=[2, 3]) / weights.sum(dim=[2, 3])
+        return (x * weights).sum(dim=[2, 3]) / (weights.sum(dim=[2, 3]) + 1e-6)
+        #return (x * weights).sum(dim=[2, 3]) / weights.sum(dim=[2, 3])
 
 class DSE_Global(nn.Module):
     def __init__(self, in_channels, out_channels=128):
