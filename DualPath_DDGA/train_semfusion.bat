@@ -13,7 +13,7 @@ python train_dualpath_fusion.py --dataset FER2013Plus --output_dir logs/semfusio
 
 echo ==========================================================
 echo 🔥 Training DualPath_PartialAttention (standard) on FER2013
-pythontrain_dualpath_fusion.py --dataset Affectnet --output_dir logs/semfusion_Affectnet
+python train_dualpath_fusion.py --dataset Affectnet --output_dir logs/semfusion_Affectnet
 
 echo ✅ All Trainings Completed Successfully!
 pause

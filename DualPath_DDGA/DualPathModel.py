@@ -71,6 +71,18 @@ class CrossLevelSEBlock(nn.Module):
         out = torch.cat([local_feat, global_feat], dim=1)
 
         return out
+
+# ✨ Dynamic Recalibration Module (DRM)
+class DynamicRecalibration(nn.Module):
+    def __init__(self, channels):
+        super(DynamicRecalibration, self).__init__()
+        self.depthwise_conv = nn.Conv2d(channels, channels, kernel_size=1, groups=channels, bias=True)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        se = self.depthwise_conv(x)
+        se = self.sigmoid(se)
+        return x * se + x  # residual connection
     
 class DualPath(nn.Module):
     def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', pretrained=True, 
@@ -103,24 +115,93 @@ class DualPath(nn.Module):
         B, C, H, W = feat.size()
 
         # === Local Pathway ===
-        pra_feat = self.pra(feat)                           # [B, H*W, C]
-        pra_feat = pra_feat.transpose(1, 2).view(B, C, H, W)  # [B, C, H, W]
+        pra_feat = self.pra(feat).transpose(1, 2).view(B, C, H, W)  # (B, C, H, W)
 
         # === Global Pathway ===
-        app_feat = self.app(feat)
+        app_feat = self.app(feat)  # Mungkin keluar (B, C, 1, 1)
 
-        # Fusion: Concatenate along channel dim
-        #fused = torch.cat([pra_feat, app_feat], dim=1)  # [B, 2C, H, W]
+        # === Fix dimension mismatch ===
+        if app_feat.shape[-2:] != pra_feat.shape[-2:]:
+            app_feat = F.interpolate(app_feat, size=pra_feat.shape[2:], mode='bilinear', align_corners=False)
 
-        # === Final Fusion Attention via SE ===
-        fused_feat = self.se_fusion(pra_feat,app_feat)
-        fused_feat = self.reduction_conv(fused_feat)     # (B, C, H, W)
+        # === Fusion ===
+        fused_feat = torch.cat([pra_feat, app_feat], dim=1)  # Sekarang aman concat
+        fused_feat = self.se_fusion(fused_feat)
+        fused_feat = self.reduction_conv(fused_feat)
         # === Classification Head ===
         pooled = self.global_pool(fused_feat).flatten(1)
         out = self.classifier(self.dropout(pooled))       # [B, num_classes]
 
         return out
 
+class DualPath_DRM(nn.Module):
+    def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', pretrained=True, 
+                 in_channels=3, use_attention=True):
+        super(DualPath_DRM, self).__init__()
+
+        # Backbone
+        self.backbone = create_model(
+            backbone_name,
+            pretrained=pretrained,
+            features_only=True,
+            in_chans=in_channels
+        )
+        self.feature_dim = self.backbone.feature_info[-1]['num_chs']  # Example: 128
+
+        # Local and Global pathways
+        self.partial_attention = PartialAttentionMasking(masking_ratio=0.5, strategy="topk")
+        self.pra = PRA_MultiheadAttention(embed_dim=self.feature_dim)
+        self.se_local = DSE_Local(in_channels=self.feature_dim, out_channels=self.feature_dim)
+        self.app = AGAPP(dim=self.feature_dim)
+        self.se_global = DSE_Global(in_channels=self.feature_dim, out_channels=self.feature_dim)
+
+        # Fusion
+        self.ddga = DDGA_DSF(feature_dim=self.feature_dim, use_attention=use_attention)
+        
+        # FIX INI:
+        fusion_channels = self.feature_dim * 2  # 128 * 4 = 512
+        self.reduction_conv = nn.Conv2d(fusion_channels, self.feature_dim, kernel_size=1)
+
+        # ✨ Dynamic Recalibration Module
+        self.drm = DynamicRecalibration(channels=self.feature_dim)
+
+        # Pooling and Classifier
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(0.3)
+        self.classifier = nn.Linear(self.feature_dim, num_classes)
+
+    def forward(self, x):
+        feat = self.backbone(x)[-1]
+        B, C, H, W = feat.size()
+
+        feat = self.partial_attention(feat)
+
+        # Local pathway
+        pra_feat = self.pra(feat).transpose(1, 2).view(B, C, H, W)
+        pra_feat = self.se_local(pra_feat)
+
+        # Global pathway
+        app_feat = self.app(feat)
+        app_feat = self.se_global(app_feat)
+        if app_feat.shape[-2:] != pra_feat.shape[-2:]:
+            app_feat = F.interpolate(app_feat, size=pra_feat.shape[2:], mode='bilinear', align_corners=False)
+
+        # Fusion with DDGA
+        fused_feat, entropy_loss = self.ddga(pra_feat, app_feat)
+        #print(f"[DEBUG] Fused Feature Shape after DDGA: {fused_feat.shape}")
+        # Reduction + Dynamic Recalibration
+        fused_feat = self.reduction_conv(fused_feat)
+        fused_feat = self.drm(fused_feat)
+
+        # Pooling and classification
+        pooled = self.global_pool(fused_feat).flatten(1)
+        out = self.classifier(self.dropout(pooled))
+
+        return {
+            'logits': out,
+            'entropy_loss': entropy_loss
+        }
+        
 class DualPath_DDGA(nn.Module):
     def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', pretrained=True, in_channels=3):
         super(DualPath_DDGA, self).__init__()
@@ -171,8 +252,68 @@ class DualPath_DDGA(nn.Module):
         pooled = self.global_pool(fused_feat).view(B, C)  # [B, C]
         out = self.classifier(self.dropout(pooled))       # [B, num_classes]
 
-        return out
+        return {
+            'logits': out,
+            'entropy_loss': entropy_loss
+            }
 
+class DualPath_Fusion(nn.Module):
+    def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', 
+                 pretrained=True, in_channels=3, use_attention=True):
+        super(DualPath_Fusion, self).__init__()
+        
+        
+        # Backbone: EfficientViT pretrained
+        self.backbone = create_model(backbone_name, pretrained=pretrained, features_only=True, 
+                                     in_chans=in_channels)
+        
+        self.feature_dim = self.backbone.feature_info[-1]['num_chs']  # usually 128
+        self.partial_attention = PartialAttentionMasking(masking_ratio=0.5, strategy="topk")
+        # Local pathway
+        self.pra = PRA_MultiheadAttention(embed_dim=self.feature_dim)
+        self.se_local = DSE_Local(in_channels=self.feature_dim, out_channels=self.feature_dim)
+
+        # Global pathway
+        self.app = AGAPP(dim=self.feature_dim)
+        self.se_global = DSE_Global(in_channels=self.feature_dim, out_channels=self.feature_dim)
+
+        # Dynamic attention to fuse both pathways
+        self.ddga = DDGA_DSF(feature_dim=self.feature_dim,use_attention=True)  
+        self.se_fusion = SE_Block(in_channels=self.feature_dim)
+
+        # Final pooling and classifier
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(0.3)
+        self.classifier = nn.Linear(self.feature_dim, num_classes)
+
+    def forward(self, x):
+        feat = self.backbone(x)[-1]  # Extract deepest feature: [B, C, H, W]
+        B, C, H, W = feat.size()
+
+        # === Local Pathway ===
+        pra_feat = self.pra(feat)                           # [B, H*W, C]
+        pra_feat = pra_feat.transpose(1, 2).view(B, C, H, W)  # [B, C, H, W]
+        pra_feat = self.se_local(pra_feat)
+
+        # === Global Pathway ===
+        app_feat = self.app(feat)
+        app_feat = self.se_global(app_feat)
+
+        # === Dual Dynamic Gated Attention Fusion ===
+        fused_feat, entropy_loss = self.ddga(pra_feat, app_feat)
+        
+        # === Final Fusion Attention via SE ===
+        fused_feat = self.se_fusion(fused_feat)
+
+        # === Classification Head ===
+        pooled = self.global_pool(fused_feat).view(B, C)  # [B, C]
+        out = self.classifier(self.dropout(pooled))       # [B, num_classes]
+
+        return {
+            'logits': out,
+            'entropy_loss': entropy_loss
+            }
+    
 class DualPath_Baseline(nn.Module):
     def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', pretrained=True, 
                  in_channels=3,delay_ddga=True):

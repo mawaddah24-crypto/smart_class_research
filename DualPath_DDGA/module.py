@@ -184,30 +184,27 @@ class CrossLevelSEBlock(nn.Module):
     
 # === SEBlock_Enhanced ===
 class SEBlock_Enhanced(nn.Module):
-    def __init__(self, in_channels, out_channels=128):
+    def __init__(self, in_channels, out_channels=128, reduction=8):
         super(SEBlock_Enhanced, self).__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        # Add a conv layer to increase channels if needed
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-        self.fc1 = nn.Conv2d(out_channels, out_channels // 16, 1)
+        self.adjust_channels = (in_channels != out_channels)
+        if self.adjust_channels:
+            self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        self.fc1 = nn.Conv2d(out_channels, out_channels // reduction, 1)
         self.relu = nn.ReLU(inplace=True)
-        self.fc2 = nn.Conv2d(out_channels // 16, out_channels, 1)
+        self.fc2 = nn.Conv2d(out_channels // reduction, out_channels, 1)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        # Apply convolution to adjust channels if necessary
-        x = self.conv1(x)  # Adjust channels to `out_channels`
+        if self.adjust_channels:
+            x = self.conv1(x)
         
-        # Global average pooling
-        se = torch.mean(x, dim=(2, 3), keepdim=True)  # Global average pooling
-        
+        se = torch.mean(x, dim=(2, 3), keepdim=True)
         se = self.fc1(se)
         se = self.relu(se)
         se = self.fc2(se)
         se = self.sigmoid(se)
 
-        return x * se  # Scale input by SE weights
+        return x * se + x  # Residual preserve for stability
     
 # === APP untuk Global Features ===
 class AdaptivePatchPooling(nn.Module):
@@ -392,6 +389,10 @@ class DDGA_DSF(nn.Module):
             self.attention = None
 
     def forward(self, pra_feat, app_feat):
+        # 🔥 Penyesuaian ukuran feature map sebelum concatenation
+        if pra_feat.size()[2:] != app_feat.size()[2:]:
+            app_feat = F.interpolate(app_feat, size=pra_feat.shape[2:], mode='bilinear', align_corners=False)
+
         # Step 1: Concatenate features
         fusion = torch.cat([pra_feat, app_feat], dim=1)  # [B, 2C, H, W]
 

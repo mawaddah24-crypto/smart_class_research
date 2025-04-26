@@ -12,7 +12,7 @@ from torchvision import transforms,datasets
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
-from DualPathModel import DualPath_DDGA
+from DualPathModel import DualPath_DDGA, DualPath_Fusion, DualPath_DRM
 from loaders import load_pretrained_backbone
 #from FERLandmarkDataset import FERLandmarkCachedDataset  # Sesuaikan ini
 from FocalLoss import FocalLoss
@@ -66,7 +66,13 @@ def train(args):
     
     
     # 🔧 Inisialisasi model
-    model = DualPath_DDGA(num_classes=args.num_classes, pretrained=True)
+    if args.model == "fusion":
+        model = DualPath_Fusion(num_classes=args.num_classes, pretrained=True)
+    elif args.model == "drm":
+        model = DualPath_DRM(num_classes=args.num_classes, pretrained=True)
+    else:
+        model = DualPath_DDGA(num_classes=args.num_classes, pretrained=True)
+        
     model.to(device)
     
     checkpoint_path = os.path.join(args.output_dir, f'{args.model}_{args.dataset}_last.pt')
@@ -111,7 +117,7 @@ def train(args):
        
     train_dataset = datasets.ImageFolder(train_path, train_transforms)
     val_dataset = datasets.ImageFolder(val_path, val_transform)
-    print(f"📊 Train samples: {len(train_dataset)} | Val samples: {len(val_dataset)}")
+    print(f"📊 Train Dataset {args.dataset}: {len(train_dataset)} | Val samples: {len(val_dataset)}")
         
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4,pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4,pin_memory=True)
@@ -134,6 +140,7 @@ def train(args):
         if os.path.exists(log_file):
             history = pd.read_csv(log_file).to_dict('records')
 
+    print(f"✅ Train Model: {args.model}")
     for epoch in range(start_epoch, args.epochs):
         model.train()
         running_loss = 0.0
@@ -143,9 +150,7 @@ def train(args):
             set_backbone_trainable(model, False)
         else:
             set_backbone_trainable(model, True)
-            if args.model == "baseline":
-                model.delay_ddga=False
-                
+           
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{args.epochs}]", unit='batch')
         for batch_idx, (imgs, labels) in enumerate(loop):
             imgs, labels = imgs.to(device), labels.to(device)
@@ -162,9 +167,15 @@ def train(args):
             optimizer.zero_grad()
             with torch.amp.autocast(device_type='cuda'):
                 outputs = model(imgs)
-
-                logits = outputs['logits'] if isinstance(outputs, dict) else outputs
-                entropy_loss = outputs.get('entropy_loss', None) if isinstance(outputs, dict) else None
+                # Fix parsing output
+                if isinstance(outputs, dict):
+                    logits = outputs['logits']
+                    entropy_loss = outputs.get('entropy_loss', None)
+                elif isinstance(outputs, (tuple, list)):
+                    logits, entropy_loss = outputs
+                else:
+                    logits = outputs
+                    entropy_loss = None
 
                 # Loss Mixup
                 loss_cls = lam * criterion(logits, labels_a) + (1 - lam) * criterion(logits, labels_b)
@@ -180,7 +191,7 @@ def train(args):
             scaler.update()
             
             running_loss += loss.item()
-            _, predicted = torch.max(outputs, 1)
+            _, predicted = torch.max(logits, 1)
             correct += (predicted == labels).sum().item()
             total += labels.size(0)
             loop.set_postfix(loss=loss.item(), acc=100.*correct/total)
@@ -198,21 +209,18 @@ def train(args):
                 imgs, labels = imgs.to(device), labels.to(device)
                 with torch.amp.autocast(device_type='cuda'):
                     outputs = model(imgs)
-
                     logits = outputs['logits'] if isinstance(outputs, dict) else outputs
                     entropy_loss = outputs.get('entropy_loss', None) if isinstance(outputs, dict) else None
 
-                    # Loss Mixup
-                    loss_cls = lam * criterion(logits, labels_a) + (1 - lam) * criterion(logits, labels_b)
+                    loss_cls = criterion(logits, labels)
 
-                    # Combine Loss with Entropy Regularization
                     if entropy_loss is not None:
                         loss = loss_cls + lambda_entropy * (1 - entropy_loss)
                     else:
                         loss = loss_cls
                         
                 val_loss += loss.item()
-                _, predicted = torch.max(outputs, 1)
+                _, predicted = torch.max(logits, 1)
                 val_correct += (predicted == labels).sum().item()
                 
                 val_total += labels.size(0)
@@ -221,7 +229,8 @@ def train(args):
         val_acc = 100 * val_correct / val_total
         val_loss_avg = val_loss / len(val_loader)
         scheduler.step(val_loss)
-        print(f"\nEpoch {epoch+1}: Loss: {loss_cls:.4f}, Entropy Loss: {entropy_loss:.4f}, Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}% | Val Loss: {val_loss_avg:.4f}")
+        entropy_val = entropy_loss.item() if entropy_loss is not None else 0.0
+        print(f"\nEpoch {epoch+1}: Loss: {loss_cls.item():.4f}, Entropy Loss: {entropy_val:.4f}, Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}% | Val Loss: {val_loss_avg:.4f}")
     
         torch.save({
             'epoch': epoch + 1,
@@ -274,7 +283,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--early_stop", type=int, default=10)
-    parser.add_argument('--model', type=str, default='ddga', choices=['ddga'])
+    parser.add_argument('--model', type=str, default='ddga', choices=['ddga','fusion','drm'])
     parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sgd'])
     args = parser.parse_args()
 

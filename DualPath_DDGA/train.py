@@ -130,7 +130,7 @@ def train(args):
        
     train_dataset = datasets.ImageFolder(train_path, train_transforms)
     val_dataset = datasets.ImageFolder(val_path, val_transform)
-    print(f"📊 Train samples: {len(train_dataset)} | Val samples: {len(val_dataset)}")
+    print(f"📊 Train Dataset {args.dataset}: {len(train_dataset)} | Val samples: {len(val_dataset)}")
         
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4,pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4,pin_memory=True)
