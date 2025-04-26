@@ -12,11 +12,7 @@ from torchvision import transforms,datasets
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
-from DualPathModel import (DualPath_Base_Partial, 
-                           DualPath_Baseline_DSE,
-                           DualPath_Baseline, 
-                           DualPath_PartialAttentionModif,
-                           DualPath_PartialAttentionSAP)
+from DualPath_SemFusion import DualPath_SemFusion
 from loaders import load_pretrained_backbone
 #from FERLandmarkDataset import FERLandmarkCachedDataset  # Sesuaikan ini
 from FocalLoss import FocalLoss
@@ -70,19 +66,7 @@ def train(args):
     
     
     # 🔧 Inisialisasi model
-    if args.model == "baseline":
-        model = DualPath_Baseline(num_classes=args.num_classes, pretrained=True)
-    elif args.model == "dse":
-        model = DualPath_Baseline_DSE(num_classes=args.num_classes, pretrained=True)
-    elif args.model == "partial":
-        model = DualPath_Base_Partial(num_classes=args.num_classes, pretrained=True)
-    elif args.model == "partialmodif":
-        model = DualPath_PartialAttentionModif(num_classes=args.num_classes, pretrained=True)
-    elif args.model == "semantic":
-        model = DualPath_PartialAttentionSAP(num_classes=args.num_classes, pretrained=True)
-    else:
-        raise ValueError(f"Unknown model type {args.model}")
-
+    model = DualPath_SemFusion(num_classes=args.num_classes, pretrained=True)
     model.to(device)
     
     checkpoint_path = os.path.join(args.output_dir, f'{args.model}_{args.dataset}_last.pt')
@@ -216,8 +200,28 @@ def train(args):
         scheduler.step(val_loss)
         print(f"\nEpoch {epoch+1}: Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}% | Val Loss: {val_loss_avg:.4f}")
         
-        
-                        
+        # Save Top-K Checkpoints
+        model_filename = f"{args.output_dir}/{args.model}_{args.dataset}_epoch{epoch+1}_acc{val_acc:.2f}.pt"
+        torch.save(model.state_dict(), model_filename)
+
+        topk_checkpoints.append((val_acc, model_filename))
+        topk_checkpoints = sorted(topk_checkpoints, key=lambda x: x[0], reverse=True)
+
+        # 🔥 Hanya hapus jika sudah lebih dari topk checkpoint
+        if len(topk_checkpoints) > topk:
+            # Keep only topk
+            topk_checkpoints = topk_checkpoints[:topk]
+            
+            # Kumpulkan file yang valid
+            valid_files = set(f for _, f in topk_checkpoints)
+
+            # Scan semua file .pt di folder
+            for file in os.listdir(args.output_dir):
+                if file.endswith(".pt"):
+                    file_path = os.path.join(args.output_dir, file)
+                    if file_path not in valid_files and os.path.exists(file_path):
+                        os.remove(file_path)
+                        print(f"🗑️ Deleted checkpoint outside top-{topk}: {file}")
         torch.save({
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
@@ -268,7 +272,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--early_stop", type=int, default=10)
-    parser.add_argument('--model', type=str, default='baseline', choices=['dse', 'baseline','partialmodif','partial','semantic'])
+    parser.add_argument('--model', type=str, default='semfusion', choices=['semfusion', 'baseline'])
     parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sgd'])
     args = parser.parse_args()
 

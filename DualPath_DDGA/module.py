@@ -87,26 +87,25 @@ class CrossLevelDualGatedAttention(nn.Module):
             nn.Conv2d(dim, dim, kernel_size=1),
             nn.Sigmoid()
         )
-        self.fusion_proj = nn.Conv2d(dim * 2, dim, kernel_size=1)
+        # INI YANG DIRUBAH:
+        self.fusion_proj = nn.Conv2d(dim * 2, dim * 2, kernel_size=1)  # channel tetap 2C
 
     def forward(self, local_feat, global_feat):
-        """
-        local_feat: [B, C, H, W]
-        global_feat: [B, C, H, W]
-        """
+        B, C, H, W = local_feat.shape
+
         local_proj = self.local_proj(local_feat)
         global_proj = self.global_proj(global_feat)
 
-        # Cross-level gating
+        if global_proj.shape[-2:] != (H, W):
+            global_proj = torch.nn.functional.interpolate(global_proj, size=(H, W), mode='bilinear', align_corners=False)
+
         concat_feat = torch.cat([local_proj, global_proj], dim=1)
         gate = self.cross_gate(concat_feat)
 
-        # Apply gate
         gated_local = local_proj * gate
         gated_global = global_proj * (1 - gate)
 
-        # Fuse
-        fused_feat = torch.cat([gated_local, gated_global], dim=1)
+        fused_feat = torch.cat([gated_local, gated_global], dim=1)  # [B, 2C, H, W]
         out = self.fusion_proj(fused_feat)
 
         return out
@@ -193,6 +192,30 @@ class PRA_MultiheadAttention(nn.Module):
         output = self.dropout(output)  # Dropout for regularization
         return output
 
+# ====== CrossLevelSEBlock ======
+class CrossLevelSEBlock(nn.Module):
+    def __init__(self, in_channels, reduction=16, grid_size=2):
+        super(CrossLevelSEBlock, self).__init__()
+        assert in_channels % 2 == 0, "in_channels harus genap karena akan di-split."
+
+        self.local_se = DSE_Local(in_channels // 2, out_channels=in_channels // 2, grid_size=grid_size)
+        self.global_se = DSE_Global(in_channels // 2, out_channels=in_channels // 2)
+
+    def forward(self, x):
+        B, C, H, W = x.size()
+        
+        # Split hasil fusion ke Local dan Global
+        local_feat, global_feat = torch.chunk(x, chunks=2, dim=1)
+
+        # Apply masing-masing DSE
+        local_feat = self.local_se(local_feat)
+        global_feat = self.global_se(global_feat)
+
+        # Combine kembali
+        out = torch.cat([local_feat, global_feat], dim=1)
+
+        return out
+    
 # === SEBlock_Enhanced ===
 class SEBlock_Enhanced(nn.Module):
     def __init__(self, in_channels, out_channels=128):
