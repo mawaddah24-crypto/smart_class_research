@@ -1,6 +1,14 @@
 @echo off
 echo ==========================================================
 echo 🔥 Training DualPath_Baseline on RAF-DB
+python train.py --model dual --dataset RAF-DB --output_dir logs/dual_rafdb
+
+echo ==========================================================
+echo 🔥 Training DualPath_Baseline on FER2013
+python train.py --model dual --dataset FER2013 --output_dir logs/dual_fer2013
+
+echo ==========================================================
+echo 🔥 Training DualPath_Baseline on RAF-DB
 python train.py --model baseline --dataset RAF-DB --output_dir logs/baseline_rafdb
 
 echo ==========================================================
