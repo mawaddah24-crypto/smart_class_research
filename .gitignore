@@ -1,30 +1,43 @@
-# Python
-__pycache__/
-*.py[cod]
-*.so
+# =========================================
+# 🧹 Gitignore untuk DualPath+LSTM Project
+# =========================================
 
-# Jupyter
+# 🧠 Model Checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# ⚙️ Log Files
+logs/
+*.log
+*.csv
+
+# 📂 Dataset Directory
+../dataset_cropped_yolo/
+../CASME2_Cropped_YOLO/
+../CASME2_Sequences_YOLO/
+../datasets/
+data/
+dataset/
+
+# 🛠️ Python Cache Files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 🖥️ System Files
+.DS_Store
+Thumbs.db
+
+# 🔥 Jupyter Checkpoints
 .ipynb_checkpoints/
 
-# Environment & IDE
-.env
-*.log
-.vscode/
-*.DS_Store
+# 🧹 Temporary Files
+*.tmp
+*.bak
+*.swp
 
-# Dataset & weights
-weights/
-*.rar
-*.zip
-*.tar
-*.7z
-
-# Checkpoints
-*.pt
-*.ckpt
-*.pth
-
-# Training logs
-logs/
-runs/
-*.csv
+# 🚀 Selective Un-Ignore (Opsional)
+# Simpan hanya best model untuk GitHub
+!logs/best_model.pt
