@@ -76,40 +76,6 @@ class DynamicGridDSE(nn.Module):
         out = x * pooled
         return out
 
-class CrossLevelDualGatedAttention(nn.Module):
-    def __init__(self, dim):
-        super(CrossLevelDualGatedAttention, self).__init__()
-        self.local_proj = nn.Conv2d(dim, dim, kernel_size=1)
-        self.global_proj = nn.Conv2d(dim, dim, kernel_size=1)
-        self.cross_gate = nn.Sequential(
-            nn.Conv2d(dim * 2, dim, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(dim, dim, kernel_size=1),
-            nn.Sigmoid()
-        )
-        # INI YANG DIRUBAH:
-        self.fusion_proj = nn.Conv2d(dim * 2, dim * 2, kernel_size=1)  # channel tetap 2C
-
-    def forward(self, local_feat, global_feat):
-        B, C, H, W = local_feat.shape
-
-        local_proj = self.local_proj(local_feat)
-        global_proj = self.global_proj(global_feat)
-
-        if global_proj.shape[-2:] != (H, W):
-            global_proj = torch.nn.functional.interpolate(global_proj, size=(H, W), mode='bilinear', align_corners=False)
-
-        concat_feat = torch.cat([local_proj, global_proj], dim=1)
-        gate = self.cross_gate(concat_feat)
-
-        gated_local = local_proj * gate
-        gated_global = global_proj * (1 - gate)
-
-        fused_feat = torch.cat([gated_local, gated_global], dim=1)  # [B, 2C, H, W]
-        out = self.fusion_proj(fused_feat)
-
-        return out
-
 # === PartialAttentionMasking ===
 class PartialAttentionMasking(nn.Module):
     def __init__(self, masking_ratio=0.5, strategy="topk"):
@@ -399,7 +365,104 @@ class PRA_DSE(nn.Module):
         x_reshaped = x.transpose(1, 2).view(B, C, H, W)
         x_dse = self.dse(x_reshaped)
         return x_dse
+
+
+# === DSF-DDGA (Dynamic Soft Fusion Dual Gating Attention) ===
+class DDGA_DSF(nn.Module):
+    def __init__(self, feature_dim, use_attention=False):
+        super(DDGA_DSF, self).__init__()
+        self.feature_dim = feature_dim
+        self.use_attention = use_attention
+
+        # Gating network: predict soft routing weights
+        self.gate_fc = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(feature_dim * 2, 2)  # output 2 routing scores: PRA and APP
+        )
+
+        # Optional attention layer untuk fusi feature
+        if self.use_attention:
+            self.attention = nn.Sequential(
+                nn.Conv2d(feature_dim * 2, feature_dim, kernel_size=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(feature_dim, feature_dim, kernel_size=1)
+            )
+        else:
+            self.attention = None
+
+    def forward(self, pra_feat, app_feat):
+        # Step 1: Concatenate features
+        fusion = torch.cat([pra_feat, app_feat], dim=1)  # [B, 2C, H, W]
+
+        # Step 2: Predict gating scores
+        gate_logits = self.gate_fc(fusion)
+        gate_scores = F.softmax(gate_logits, dim=1)  # [B, 2]
+
+        gate_pra = gate_scores[:, 0].unsqueeze(1).unsqueeze(2).unsqueeze(3)  # [B, 1, 1, 1]
+        gate_app = gate_scores[:, 1].unsqueeze(1).unsqueeze(2).unsqueeze(3)  # [B, 1, 1, 1]
+
+        # Step 3: Weighted sum
+        fused_feat = gate_pra * pra_feat + gate_app * app_feat
+
+        # Step 4: Residual shortcut (optional, untuk stabilisasi)
+        fused_feat = fused_feat + 0.5 * (pra_feat + app_feat)
+
+        # Step 5: Optional lightweight attention fusion
+        if self.attention is not None:
+            fused_feat = self.attention(torch.cat([pra_feat, app_feat], dim=1))
+
+        # Step 6: Compute entropy regularization
+        entropy = -(gate_scores * gate_scores.log()).sum(dim=1).mean()
+
+        return fused_feat, entropy
     
+# Dual Dynamic Gated Attention Fusion Entropy Regularization Calculation
+class DDGA_Entropy(nn.Module):
+    def __init__(self, dim):
+        super(DDGA_Entropy, self).__init__()
+        self.gate_local = nn.Sequential(
+            nn.Conv2d(dim, dim, kernel_size=1),
+            nn.BatchNorm2d(dim),
+            nn.Sigmoid()
+        )
+        self.gate_global = nn.Sequential(
+            nn.Conv2d(dim, dim, kernel_size=1),
+            nn.BatchNorm2d(dim),
+            nn.Sigmoid()
+        )
+        self.fusion = nn.Conv2d(dim * 2, dim, kernel_size=1)
+
+    def forward(self, local_feat, global_feat):
+        # Gated local and global feature maps
+        l_gate = self.gate_local(local_feat) * local_feat
+        g_gate = self.gate_global(global_feat) * global_feat
+
+        # 🔥 Adjust size if needed (upsampling global_feat)
+        if l_gate.size()[2:] != g_gate.size()[2:]:
+            g_gate = F.interpolate(g_gate, size=(l_gate.size(2), l_gate.size(3)), mode='bilinear', align_corners=False)
+
+        # Fuse gated features
+        fused = torch.cat([l_gate, g_gate], dim=1)
+        fused = self.fusion(fused)
+
+        # 🔥 Entropy Regularization Calculation
+        # Take the gating maps before element-wise multiplication
+        l_score = self.gate_local(local_feat)
+        g_score = self.gate_global(global_feat)
+
+        # Normalize scores to probability distribution per location
+        total_score = l_score + g_score + 1e-8  # Avoid division by zero
+        l_prob = l_score / total_score
+        g_prob = g_score / total_score
+
+        # Entropy per pixel
+        entropy_map = -(l_prob * torch.log(l_prob + 1e-8) + g_prob * torch.log(g_prob + 1e-8))
+        entropy_loss = entropy_map.mean()
+
+        return fused, entropy_loss
+        
+# === Dual Dynamic Gated Attention Fusion ===
 class DDGA(nn.Module):
     def __init__(self, dim):
         super(DDGA, self).__init__()
@@ -425,6 +488,41 @@ class DDGA(nn.Module):
 
         fused = torch.cat([l_gate, g_gate], dim=1)
         return self.fusion(fused)
+
+# === Cross Dual Dynamic Gated Attention Fusion ===
+class CrossLevelDualGatedAttention(nn.Module):
+    def __init__(self, dim):
+        super(CrossLevelDualGatedAttention, self).__init__()
+        self.local_proj = nn.Conv2d(dim, dim, kernel_size=1)
+        self.global_proj = nn.Conv2d(dim, dim, kernel_size=1)
+        self.cross_gate = nn.Sequential(
+            nn.Conv2d(dim * 2, dim, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(dim, dim, kernel_size=1),
+            nn.Sigmoid()
+        )
+        # INI YANG DIRUBAH:
+        self.fusion_proj = nn.Conv2d(dim * 2, dim * 2, kernel_size=1)  # channel tetap 2C
+
+    def forward(self, local_feat, global_feat):
+        B, C, H, W = local_feat.shape
+
+        local_proj = self.local_proj(local_feat)
+        global_proj = self.global_proj(global_feat)
+
+        if global_proj.shape[-2:] != (H, W):
+            global_proj = torch.nn.functional.interpolate(global_proj, size=(H, W), mode='bilinear', align_corners=False)
+
+        concat_feat = torch.cat([local_proj, global_proj], dim=1)
+        gate = self.cross_gate(concat_feat)
+
+        gated_local = local_proj * gate
+        gated_global = global_proj * (1 - gate)
+
+        fused_feat = torch.cat([gated_local, gated_global], dim=1)  # [B, 2C, H, W]
+        out = self.fusion_proj(fused_feat)
+
+        return out
 
 #Modifikasi APP (HierarchicalAPP) menyusun informasi dari multi-skala patch:
 class HierarchicalAPP(nn.Module):
