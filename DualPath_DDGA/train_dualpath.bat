@@ -31,5 +31,14 @@ echo ==========================================================
 echo 🔥 Training DualPath_PartialAttention_SAP on FER2013
 python train.py --model semantic --dataset FER2013 --output_dir logs/semantic_fer2013
 echo ==========================================================
+
+echo ==========================================================
+echo 🔥 Training DualPath_Baseline_DSE on RAF-DB
+python train.py --model dse --dataset RAF-DB --output_dir logs/semantic_rafdb
+
+echo ==========================================================
+echo 🔥 Training DualPath_Baseline_DSE on FER2013
+python train.py --model dse --dataset FER2013 --output_dir logs/semantic_fer2013
+echo ==========================================================
 echo ✅ All Trainings Completed Successfully!
 pause

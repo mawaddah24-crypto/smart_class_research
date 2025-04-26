@@ -13,6 +13,7 @@ from tqdm import tqdm
 import pandas as pd
 import numpy as np
 from DualPathModel import (DualPath_Base_Partial, 
+                           DualPath_Baseline_DSE,
                            DualPath_Baseline, 
                            DualPath_PartialAttentionModif,
                            DualPath_PartialAttentionSAP)
@@ -71,6 +72,8 @@ def train(args):
     # 🔧 Inisialisasi model
     if args.model == "baseline":
         model = DualPath_Baseline(num_classes=args.num_classes, pretrained=True)
+    elif args.model == "dse":
+        model = DualPath_Baseline_DSE(num_classes=args.num_classes, pretrained=True)
     elif args.model == "partial":
         model = DualPath_Base_Partial(num_classes=args.num_classes, pretrained=True)
     elif args.model == "partialmodif":
@@ -218,17 +221,23 @@ def train(args):
         torch.save(model.state_dict(), model_filename)
 
         topk_checkpoints.append((val_acc, model_filename))
-        topk_checkpoints = sorted(topk_checkpoints, key=lambda x: x[0], reverse=True)[:topk]
-        
-        # 🔥 Hapus semua file di folder yang tidak masuk top-K
-        all_files = set(f for _, f in topk_checkpoints)
-        for file in os.listdir(args.output_dir):
-            if file.endswith(".pt"):
-                file_path = os.path.join(args.output_dir, file)
-                if file_path not in all_files and os.path.exists(file_path):
-                    os.remove(file_path)
-                    print(f"🗑️ Deleted checkpoint outside top-{topk}: {file}")
-                
+        topk_checkpoints = sorted(topk_checkpoints, key=lambda x: x[0], reverse=True)
+
+        # 🔥 Hanya hapus jika sudah lebih dari topk checkpoint
+        if len(topk_checkpoints) > topk:
+            # Keep only topk
+            topk_checkpoints = topk_checkpoints[:topk]
+            
+            # Kumpulkan file yang valid
+            valid_files = set(f for _, f in topk_checkpoints)
+
+            # Scan semua file .pt di folder
+            for file in os.listdir(args.output_dir):
+                if file.endswith(".pt"):
+                    file_path = os.path.join(args.output_dir, file)
+                    if file_path not in valid_files and os.path.exists(file_path):
+                        os.remove(file_path)
+                        print(f"🗑️ Deleted checkpoint outside top-{topk}: {file}")
         torch.save({
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
@@ -252,7 +261,7 @@ def train(args):
             
         # ⏺️ Logging CSV
         row = {"epoch": epoch+1, "train_loss": running_loss / len(train_loader),
-       "val_loss": val_loss_avg, "val_acc": val_acc}
+       "val_loss": val_loss_avg, "val_loss_acc": val_loss,"val_acc": val_acc}
         history.append(row)
         pd.DataFrame(history).to_csv(log_file, index=False)
         
@@ -279,7 +288,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--early_stop", type=int, default=10)
-    parser.add_argument('--model', type=str, default='baseline', choices=['baseline','partialmodif','partial','semantic'])
+    parser.add_argument('--model', type=str, default='baseline', choices=['dse', 'baseline','partialmodif','partial','semantic'])
     parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sgd'])
     args = parser.parse_args()
 
