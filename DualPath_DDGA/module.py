@@ -515,7 +515,7 @@ class DDGA_DSF(nn.Module):
         # Step 6: Compute entropy regularization
         entropy = -(gate_scores * gate_scores.log()).sum(dim=1).mean()
 
-        return fused_feat, entropy
+        return fused_feat, entropy, gate_scores
     
 # Dual Dynamic Gated Attention Fusion Entropy Regularization Calculation
 class DDGA_Entropy(nn.Module):

@@ -16,6 +16,14 @@ from DualPathModel import DualPath_DDGA, DualPath_Fusion, DualPath_DRM
 from loaders import load_pretrained_backbone
 #from FERLandmarkDataset import FERLandmarkCachedDataset  # Sesuaikan ini
 from FocalLoss import FocalLoss
+from AdaptiveEntropyController import AdaptiveEntropyController
+
+# Inisialisasi controller
+entropy_controller = AdaptiveEntropyController(
+    start_lambda=0.01, 
+    min_lambda=0.002, 
+    decay_epochs=(15, 30, 50)
+)
 # --------------------------
 # Fungsi Augmentasi MixUp & CutMix
 # --------------------------
@@ -126,7 +134,7 @@ def train(args):
     start_epoch = 0
     best_acc = 0
     history = []
-    lambda_entropy = 0.05
+    
     os.makedirs(args.output_dir, exist_ok=True)
     early_stop_counter = 0
     if os.path.exists(checkpoint_path):
@@ -146,11 +154,11 @@ def train(args):
         running_loss = 0.0
         correct = 0
         total = 0
-        if epoch < 3:
+        if epoch < 5:
             set_backbone_trainable(model, False)
         else:
             set_backbone_trainable(model, True)
-           
+        
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{args.epochs}]", unit='batch')
         for batch_idx, (imgs, labels) in enumerate(loop):
             imgs, labels = imgs.to(device), labels.to(device)
@@ -171,17 +179,22 @@ def train(args):
                 if isinstance(outputs, dict):
                     logits = outputs['logits']
                     entropy_loss = outputs.get('entropy_loss', None)
+                    gate_scores = outputs.get('gate_scores', None)
                 elif isinstance(outputs, (tuple, list)):
-                    logits, entropy_loss = outputs
+                    logits, entropy_loss, gate_scores = outputs
                 else:
                     logits = outputs
                     entropy_loss = None
-
+                    gate_scores = None
                 # Loss Mixup
                 loss_cls = lam * criterion(logits, labels_a) + (1 - lam) * criterion(logits, labels_b)
 
                 # Combine Loss with Entropy Regularization
                 if entropy_loss is not None:
+                    if gate_scores is not None:
+                        lambda_entropy = entropy_controller.get_lambda(epoch, gate_scores)
+                    else:
+                        lambda_entropy = entropy_controller.get_lambda(epoch)
                     loss = loss_cls + lambda_entropy * (1 - entropy_loss)
                 else:
                     loss = loss_cls
@@ -209,12 +222,26 @@ def train(args):
                 imgs, labels = imgs.to(device), labels.to(device)
                 with torch.amp.autocast(device_type='cuda'):
                     outputs = model(imgs)
-                    logits = outputs['logits'] if isinstance(outputs, dict) else outputs
-                    entropy_loss = outputs.get('entropy_loss', None) if isinstance(outputs, dict) else None
+                    # Fix parsing output
+                    if isinstance(outputs, dict):
+                        logits = outputs['logits']
+                        entropy_loss = outputs.get('entropy_loss', None)
+                        gate_scores = outputs.get('gate_scores', None)
+                    elif isinstance(outputs, (tuple, list)):
+                        logits, entropy_loss, gate_scores = outputs
+                    else:
+                        logits = outputs
+                        entropy_loss = None
+                        gate_scores = None
 
                     loss_cls = criterion(logits, labels)
 
+                    # Combine Loss with Entropy Regularization
                     if entropy_loss is not None:
+                        if gate_scores is not None:
+                            lambda_entropy = entropy_controller.get_lambda(epoch, gate_scores)
+                        else:
+                            lambda_entropy = entropy_controller.get_lambda(epoch)
                         loss = loss_cls + lambda_entropy * (1 - entropy_loss)
                     else:
                         loss = loss_cls
@@ -229,8 +256,8 @@ def train(args):
         val_acc = 100 * val_correct / val_total
         val_loss_avg = val_loss / len(val_loader)
         scheduler.step(val_loss)
-        entropy_val = entropy_loss.item() if entropy_loss is not None else 0.0
-        print(f"\nEpoch {epoch+1}: Loss: {loss_cls.item():.4f}, Entropy Loss: {entropy_val:.4f}, Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}% | Val Loss: {val_loss_avg:.4f}")
+        
+        print(f"\nEpoch {epoch+1}: Loss:{loss_cls.item():.4f} | Entropy:{lambda_entropy:.4f} | gate score:{gate_scores} | Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}% | Val Loss: {val_loss_avg:.4f}")
     
         torch.save({
             'epoch': epoch + 1,
@@ -254,7 +281,7 @@ def train(args):
                 break
             
         # ⏺️ Logging CSV
-        row = {"epoch": epoch+1, "loss": loss_cls, "entropy Loss": entropy_loss, 
+        row = {"epoch": epoch+1, "loss": loss_cls, "entropy Loss": lambda_entropy, 
                "train_loss": running_loss / len(train_loader),
                 "val_loss": val_loss_avg, "val_loss_acc": val_loss,"val_acc": val_acc}
         history.append(row)

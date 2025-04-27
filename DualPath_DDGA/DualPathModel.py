@@ -115,7 +115,7 @@ class DualPath_Simplified(nn.Module):
             in_chans=in_channels
         )
         self.feature_dim = self.backbone.feature_info[-1]['num_chs']  # ex: 128
-        self.verbose = True
+        self.verbose = False
         # Local and Global pathways
         self.partial_attention = PartialAttentionMasking(masking_ratio=0.5, strategy="topk")
         self.pra = PRA_MultiheadAttention(embed_dim=self.feature_dim)
@@ -267,7 +267,7 @@ class DualPath_DRM(nn.Module):
             app_feat = F.interpolate(app_feat, size=pra_feat.shape[2:], mode='bilinear', align_corners=False)
 
         # Fusion with DDGA
-        fused_feat, entropy_loss = self.ddga(pra_feat, app_feat)
+        fused_feat, entropy_loss, gate_scores = self.ddga(pra_feat, app_feat)
         #print(f"[DEBUG] Fused Feature Shape after DDGA: {fused_feat.shape}")
         # Reduction + Dynamic Recalibration
         fused_feat = self.reduction_conv(fused_feat)
@@ -279,8 +279,9 @@ class DualPath_DRM(nn.Module):
 
         return {
             'logits': out,
-            'entropy_loss': entropy_loss
-        }
+            'entropy_loss': entropy_loss,
+            'gate_scores': gate_scores
+            }
         
 class DualPath_DDGA(nn.Module):
     def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', pretrained=True, in_channels=3):
@@ -323,7 +324,7 @@ class DualPath_DDGA(nn.Module):
 
         # === Dual Dynamic Gated Attention Fusion ===
         #fused_feat = self.ddga(pra_feat, app_feat)
-        fused_feat, entropy_loss = self.ddga(pra_feat, app_feat)
+        fused_feat, entropy_loss, gate_scores = self.ddga(pra_feat, app_feat)
         
         # === Final Fusion Attention via SE ===
         fused_feat = self.se_fusion(fused_feat)
@@ -334,7 +335,8 @@ class DualPath_DDGA(nn.Module):
 
         return {
             'logits': out,
-            'entropy_loss': entropy_loss
+            'entropy_loss': entropy_loss,
+            'gate_scores': gate_scores
             }
 
 class DualPath_Fusion(nn.Module):
@@ -380,7 +382,7 @@ class DualPath_Fusion(nn.Module):
         app_feat = self.se_global(app_feat)
 
         # === Dual Dynamic Gated Attention Fusion ===
-        fused_feat, entropy_loss = self.ddga(pra_feat, app_feat)
+        fused_feat, entropy_loss, gate_scores = self.ddga(pra_feat, app_feat)
         
         # === Final Fusion Attention via SE ===
         fused_feat = self.se_fusion(fused_feat)
@@ -391,7 +393,8 @@ class DualPath_Fusion(nn.Module):
 
         return {
             'logits': out,
-            'entropy_loss': entropy_loss
+            'entropy_loss': entropy_loss,
+            'gate_scores': gate_scores
             }
     
 class DualPath_Baseline(nn.Module):
