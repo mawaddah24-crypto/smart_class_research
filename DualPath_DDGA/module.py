@@ -2,6 +2,44 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+# === Advanced PartialAttentionMasking ===
+class AdvancedPartialAttentionMasking(nn.Module):
+    def __init__(self, masking_ratio=0.5, strategy="entropy_topk"):
+        super(AdvancedPartialAttentionMasking, self).__init__()
+        self.masking_ratio = masking_ratio
+        self.strategy = strategy
+
+    def forward(self, x):
+        B, C, H, W = x.size()
+
+        if self.strategy == "entropy_topk":
+            # 1. Compute Entropy per channel
+            x_flat = x.view(B, C, -1)  # [B, C, H*W]
+            probs = F.softmax(x_flat, dim=-1) + 1e-6  # Avoid log(0)
+            entropy = -torch.sum(probs * probs.log(), dim=-1)  # [B, C]
+
+            # 2. Invert entropy to get importance (low entropy → high importance)
+            importance = -entropy  # [B, C]
+
+            # 3. Select Top-K Channels
+            k = int(C * (1 - self.masking_ratio))  # jumlah channel yang diloloskan
+            topk_scores, topk_idx = torch.topk(importance, k, dim=1)  # [B, k]
+
+            # 4. Build mask
+            mask = torch.zeros(B, C, device=x.device)
+            for b in range(B):
+                mask[b, topk_idx[b]] = 1.0
+
+            # 5. Apply mask
+            mask = mask.unsqueeze(-1).unsqueeze(-1)  # [B, C, 1, 1]
+            x = x * mask  # hanya channel terpilih yang dipertahankan
+
+            return x
+
+        else:
+            raise NotImplementedError(f"Strategy {self.strategy} not implemented.")
+        
 # === Modified PartialAttentionMasking in SemanticAwarePartialAttention ===
 class SemanticAwarePartialAttention(nn.Module):
     def __init__(self, masking_ratio=0.5, topk_semantic=True):
@@ -156,6 +194,25 @@ class PRA_MultiheadAttention(nn.Module):
         attention_output = self.layer_norm(attention_output + x)  # Residual connection
         output = self.fc(attention_output)  # Fully connected layer for feature adjustment
         output = self.dropout(output)  # Dropout for regularization
+        return output
+
+# ==== Dynamic Partial Regional Attention (D-PRA) ====
+class D_PRA(nn.Module):
+    def __init__(self, embed_dim):
+        super().__init__()
+        self.attention = nn.MultiheadAttention(embed_dim, num_heads=8, batch_first=True)
+        self.fc = nn.Linear(embed_dim, embed_dim)
+        self.dropout = nn.Dropout(0.3)
+        self.layer_norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, x):
+        B, C, H, W = x.size()
+        seq_len = H * W
+        x = x.view(B, C, seq_len).transpose(1, 2)
+        attention_output, _ = self.attention(x, x, x)
+        output = self.layer_norm(attention_output + x)
+        output = self.fc(output)
+        output = self.dropout(output)
         return output
 
 # ====== CrossLevelSEBlock ======
@@ -363,7 +420,49 @@ class PRA_DSE(nn.Module):
         x_dse = self.dse(x_reshaped)
         return x_dse
 
+# === Feature Aware-DDGA (Dynamic Soft Fusion Dual Gating Attention) ===
+class FeatureAwareDDGA(nn.Module):
+    def __init__(self, feature_dim, hidden_dim=64):
+        super(FeatureAwareDDGA, self).__init__()
+        self.feature_dim = feature_dim
 
+        # MLP kecil untuk generate gate logits dari feature statistics
+        self.gate_mlp = nn.Sequential(
+            nn.Linear(4 * feature_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, 2)
+        )
+
+    def forward(self, pra_feat, app_feat):
+        B, C, H, W = pra_feat.shape
+
+        # === Feature Statistics Extraction ===
+        pra_mean = pra_feat.mean(dim=[2, 3])  # [B, C]
+        pra_var = pra_feat.var(dim=[2, 3])
+        app_mean = app_feat.mean(dim=[2, 3])
+        app_var = app_feat.var(dim=[2, 3])
+
+        # Concatenate statistics
+        stats = torch.cat([pra_mean, pra_var, app_mean, app_var], dim=1)  # [B, 4C]
+
+        # Generate Gate Logits
+        gate_logits = self.gate_mlp(stats)  # [B, 2]
+        gate_scores = F.softmax(gate_logits, dim=1)  # [B, 2]
+
+        # Apply Gate to Features
+        gate_pra = gate_scores[:, 0].view(B, 1, 1, 1)
+        gate_app = gate_scores[:, 1].view(B, 1, 1, 1)
+
+        fused_feat = gate_pra * pra_feat + gate_app * app_feat
+
+        # === Optional: Add residual fusion
+        fused_feat = fused_feat + 0.5 * (pra_feat + app_feat)
+
+        # === Optional: Calculate entropy loss for gate diversity
+        entropy_loss = -(gate_scores * gate_scores.log()).sum(dim=1).mean()
+
+        return fused_feat, entropy_loss
+    
 # === DSF-DDGA (Dynamic Soft Fusion Dual Gating Attention) ===
 class DDGA_DSF(nn.Module):
     def __init__(self, feature_dim, use_attention=False):
@@ -490,6 +589,23 @@ class DDGA(nn.Module):
         fused = torch.cat([l_gate, g_gate], dim=1)
         return self.fusion(fused)
 
+# ==== Confidence Aware Fusion Block ====
+class ConfidenceAwareFusion(nn.Module):
+    def __init__(self, feature_dim):
+        super().__init__()
+        self.local_fc = nn.AdaptiveAvgPool2d(1)
+        self.global_fc = nn.AdaptiveAvgPool2d(1)
+
+    def forward(self, local_feat, global_feat):
+        local_conf = self.local_fc(local_feat).view(local_feat.size(0), -1).mean(dim=1, keepdim=True)
+        global_conf = self.global_fc(global_feat).view(global_feat.size(0), -1).mean(dim=1, keepdim=True)
+        sum_conf = local_conf + global_conf + 1e-6
+        alpha = local_conf / sum_conf
+        beta = global_conf / sum_conf
+
+        fused = alpha.view(-1, 1, 1, 1) * local_feat + beta.view(-1, 1, 1, 1) * global_feat
+        return fused
+    
 # === Cross Dual Dynamic Gated Attention Fusion ===
 class CrossLevelDualGatedAttention(nn.Module):
     def __init__(self, dim):
@@ -583,4 +699,28 @@ class AGAPP(nn.Module):
         att_map = self.att(x)
         x = x * att_map
         return self.pool(x)
+
+class AdaptiveContextAPP(nn.Module):
+    def __init__(self, dim):
+        super(AdaptiveContextAPP, self).__init__()
+        self.local_att = nn.Conv2d(dim, 1, kernel_size=3, padding=1)  # Saliency estimation
+        self.sigmoid = nn.Sigmoid()
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((2, 2))  # Tidak langsung 1x1
+
+    def forward(self, x):
+        saliency = self.sigmoid(self.local_att(x))
+        x = x * saliency  # Local modulation
+        pooled = self.adaptive_pool(x)  # 2x2 feature map
+        return pooled
     
+# ✨ Dynamic Recalibration Module (DRM)
+class DynamicRecalibration(nn.Module):
+    def __init__(self, channels):
+        super(DynamicRecalibration, self).__init__()
+        self.depthwise_conv = nn.Conv2d(channels, channels, kernel_size=1, groups=channels, bias=True)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        se = self.depthwise_conv(x)
+        se = self.sigmoid(se)
+        return x * se + x  # residual connection

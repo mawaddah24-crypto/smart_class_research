@@ -12,7 +12,7 @@ from torchvision import transforms,datasets
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
-from DualPath_SemFusion import DualPath_SemFusion
+from DualPathAdaptive import DualPathAdaptive
 from loaders import load_pretrained_backbone
 #from FERLandmarkDataset import FERLandmarkCachedDataset  # Sesuaikan ini
 from FocalLoss import FocalLoss
@@ -66,12 +66,12 @@ def train(args):
     
     
     # 🔧 Inisialisasi model
-    model = DualPath_SemFusion(num_classes=args.num_classes, pretrained=True)
+    model = DualPathAdaptive(num_classes=args.num_classes, pretrained=True)
     model.to(device)
     
-    checkpoint_path = os.path.join(args.output_dir, f'{args.model}_{args.dataset}_last.pt')
-    base_path = os.path.join(args.output_dir, f'{args.model}_{args.dataset}_best.pt')
-    log_file = os.path.join(args.output_dir, f'{args.model}_{args.dataset}_log.csv')
+    checkpoint_path = os.path.join(args.output_dir, f'{args.model}_{args.optimizer}_{args.dataset}_last.pt')
+    base_path = os.path.join(args.output_dir, f'{args.model}_{args.optimizer}_{args.dataset}_best.pt')
+    log_file = os.path.join(args.output_dir, f'{args.model}_{args.optimizer}_{args.dataset}_log.csv')
     
     if args.optimizer == 'adamw':
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -199,6 +199,7 @@ def train(args):
         scheduler.step(val_loss)
         print(f"\nEpoch {epoch+1}: Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}% | Val Loss: {val_loss_avg:.4f}")
         
+
         torch.save({
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),

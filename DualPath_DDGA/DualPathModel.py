@@ -3,13 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm import create_model
 from module import (
-    PartialAttentionMasking, 
+    PartialAttentionMasking, AdvancedPartialAttentionMasking,
     DSE_Global, 
     DSE_Local, 
-    DDGA, DDGA_Entropy, DDGA_DSF, 
+    DDGA, DDGA_DSF, FeatureAwareDDGA,
     AGAPP, 
-    SEBlock_Enhanced, 
-    PRA_MultiheadAttention,
+    PRA_MultiheadAttention, D_PRA,
     PRA, SE_Global, SE_Local, SE_Block, AdaptivePatchPooling, SemanticAwarePooling)
                     
 class SEBlock_Local(nn.Module):
@@ -83,7 +82,87 @@ class DynamicRecalibration(nn.Module):
         se = self.depthwise_conv(x)
         se = self.sigmoid(se)
         return x * se + x  # residual connection
-    
+
+class ConfidenceAwareFusion(nn.Module):
+    def __init__(self, feature_dim):
+        super().__init__()
+        self.local_fc = nn.AdaptiveAvgPool2d(1)   # Untuk dapatkan confidence PRA
+        self.global_fc = nn.AdaptiveAvgPool2d(1)  # Untuk dapatkan confidence APP
+
+    def forward(self, local_feat, global_feat):
+        local_conf = self.local_fc(local_feat).view(local_feat.size(0), -1).mean(dim=1, keepdim=True)
+        global_conf = self.global_fc(global_feat).view(global_feat.size(0), -1).mean(dim=1, keepdim=True)
+
+        sum_conf = local_conf + global_conf + 1e-6  # Hindari div 0
+        alpha = local_conf / sum_conf
+        beta = global_conf / sum_conf
+
+        fused = alpha.view(-1, 1, 1, 1) * local_feat + beta.view(-1, 1, 1, 1) * global_feat
+        return fused, alpha, beta
+
+
+class DualPath_Simplified(nn.Module):
+    def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', pretrained=True, 
+                 in_channels=3, delay_ddga=True):
+        super(DualPath_Simplified, self).__init__()
+        
+        self.delay_ddga=delay_ddga
+        # Backbone
+        self.backbone = create_model(
+            backbone_name,
+            pretrained=pretrained,
+            features_only=True,
+            in_chans=in_channels
+        )
+        self.feature_dim = self.backbone.feature_info[-1]['num_chs']  # ex: 128
+        self.verbose = True
+        # Local and Global pathways
+        self.partial_attention = PartialAttentionMasking(masking_ratio=0.5, strategy="topk")
+        self.pra = PRA_MultiheadAttention(embed_dim=self.feature_dim)
+        #self.se_local = DSE_Local(in_channels=self.feature_dim, out_channels=self.feature_dim)
+        self.app = AGAPP(dim=self.feature_dim)
+        #self.se_global = DSE_Global(in_channels=self.feature_dim, out_channels=self.feature_dim)
+        self.conf_fusion = ConfidenceAwareFusion(feature_dim=self.feature_dim)  # atau sesuai dimensi Anda
+        # Dynamic Recalibration
+        self.drm = DynamicRecalibration(channels=self.feature_dim)
+
+        # Pooling and Classifier
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(0.3)
+        self.classifier = nn.Linear(self.feature_dim, num_classes)
+
+    def forward(self, x):
+        feat = self.backbone(x)[-1]  # [B, C, H, W]
+        B, C, H, W = feat.size()
+
+        feat = self.partial_attention(feat)
+
+        # Local pathway
+        pra_feat = self.pra(feat).transpose(1, 2).view(B, C, H, W)
+        #pra_feat = self.se_local(pra_feat)
+
+        # Global pathway
+        app_feat = self.app(feat)
+        #app_feat = self.se_global(app_feat)
+
+        # Align spatial size if mismatch
+        if app_feat.shape[-2:] != pra_feat.shape[-2:]:
+            app_feat = F.interpolate(app_feat, size=pra_feat.shape[2:], mode='bilinear', align_corners=False)
+
+        # Fusion: Hard Sum
+        #fused_feat = pra_feat + app_feat
+        fused_feat, alpha, beta = self.conf_fusion(pra_feat, app_feat)
+        
+        # Dynamic Recalibration
+        fused_feat = self.drm(fused_feat)
+        if self.verbose:
+            print(f"[Fusion] Alpha (PRA): {alpha.mean().item():.4f}, Beta (APP): {beta.mean().item():.4f}")
+        # Pooling and Classification
+        pooled = self.global_pool(fused_feat).flatten(1)
+        out = self.classifier(self.dropout(pooled))
+
+        return out
+     
 class DualPath(nn.Module):
     def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', pretrained=True, 
                  in_channels=3, delay_ddga=True):
@@ -150,6 +229,7 @@ class DualPath_DRM(nn.Module):
 
         # Local and Global pathways
         self.partial_attention = PartialAttentionMasking(masking_ratio=0.5, strategy="topk")
+        #self.partial_attention = AdvancedPartialAttentionMasking(masking_ratio=0.5, strategy="entropy_topk")
         self.pra = PRA_MultiheadAttention(embed_dim=self.feature_dim)
         self.se_local = DSE_Local(in_channels=self.feature_dim, out_channels=self.feature_dim)
         self.app = AGAPP(dim=self.feature_dim)
@@ -157,7 +237,7 @@ class DualPath_DRM(nn.Module):
 
         # Fusion
         self.ddga = DDGA_DSF(feature_dim=self.feature_dim, use_attention=use_attention)
-        
+        #self.ddga = FeatureAwareDDGA(feature_dim=self.feature_dim)
         # FIX INI:
         fusion_channels = self.feature_dim * 2  # 128 * 4 = 512
         self.reduction_conv = nn.Conv2d(fusion_channels, self.feature_dim, kernel_size=1)
@@ -513,7 +593,8 @@ class DualPath_Base_Partial(nn.Module):
         self.feature_dim = self.backbone.feature_info[-1]['num_chs']  # usually 128
 
         self.partial_attention = PartialAttentionMasking(masking_ratio=0.5, strategy="topk")
-        
+        #self.partial_attention = AdvancedPartialAttentionMasking(masking_ratio=0.5, strategy="entropy_topk")
+
         # Local pathway
         self.pra = PRA(embed_dim=self.feature_dim)
         self.se_local = SE_Global(in_channels=self.feature_dim)

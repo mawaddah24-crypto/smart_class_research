@@ -16,6 +16,7 @@ from DualPathModel import (DualPath_Base_Partial,
                            DualPath_Baseline_DSE,
                            DualPath_Baseline,
                            DualPath, 
+                           DualPath_Simplified,
                            DualPath_PartialAttentionModif,
                            DualPath_PartialAttentionSAP)
 from loaders import load_pretrained_backbone
@@ -83,6 +84,8 @@ def train(args):
         model = DualPath_PartialAttentionSAP(num_classes=args.num_classes, pretrained=True)
     elif args.model == "dual":
         model = DualPath(num_classes=args.num_classes, pretrained=True)
+    elif args.model == "base":
+        model = DualPath_Simplified(num_classes=args.num_classes, pretrained=True)
     else:
         raise ValueError(f"Unknown model type {args.model}")
 
@@ -141,6 +144,9 @@ def train(args):
     history = []
     os.makedirs(args.output_dir, exist_ok=True)
     early_stop_counter = 0
+    
+    print(f"✅ Train Model: {args.model}")
+    
     if os.path.exists(checkpoint_path):
         print(f"🔁 Auto-loading last checkpoint from: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device,weights_only=True)
@@ -162,7 +168,10 @@ def train(args):
         else:
             set_backbone_trainable(model, True)
             model.delay_ddga=False
-                
+        
+        if epoch > 5:
+            model.delay_ddga=False
+            
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{args.epochs}]", unit='batch')
         for batch_idx, (imgs, labels) in enumerate(loop):
             imgs, labels = imgs.to(device), labels.to(device)
@@ -273,7 +282,8 @@ if __name__ == "__main__":
     parser.add_argument("--early_stop", type=int, default=10)
     parser.add_argument('--model', type=str, default='baseline', choices=['dse', 'baseline',
                                                                           'partialmodif','partial',
-                                                                          'semantic','dual'])
+                                                                          'semantic','dual',
+                                                                          'base'])
     parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sgd'])
     args = parser.parse_args()
 
