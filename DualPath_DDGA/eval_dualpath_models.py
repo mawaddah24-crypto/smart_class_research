@@ -15,6 +15,7 @@ from pathlib import Path
 # Import model
 from DualPathModel import (
     DualPath_Baseline,
+    DualPath,
     DualPath_Baseline_DSE,
     DualPath_PartialAttentionModif,
     DualPath_PartialAttentionSAP,
@@ -34,6 +35,8 @@ def load_model(model_name, num_classes):
         model = DualPath_PartialAttentionModif(num_classes=num_classes, pretrained=True)
     elif model_name == "partialsap":
         model = DualPath_PartialAttentionSAP(num_classes=num_classes, pretrained=True)
+    elif model_name == "dual":
+        model = DualPath(num_classes=num_classes, pretrained=True)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
     return model
@@ -81,15 +84,11 @@ def calculate_flops_params(model, input_size=(3, 224, 224)):
     return flops, params
 
 def main():
-    model_names = ["baseline", "baseline_dse", "partial", "partialmodif", "partialsap"]
+    model_names = ['dual',"baseline", "baseline_dse", "partial", "partialmodif", "partialsap"]
     datasets_info = {
         "rafdb": {
             "num_classes": 7,
             "path": "../dataset_cropped_yolo/rafdb/test"
-        },
-        "fer2013": {
-            "num_classes": 7,
-            "path": "../dataset_cropped_yolo/fer2013/test"
         }
     }
 

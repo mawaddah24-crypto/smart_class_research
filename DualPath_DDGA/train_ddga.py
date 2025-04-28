@@ -22,8 +22,26 @@ from AdaptiveEntropyController import AdaptiveEntropyController
 entropy_controller = AdaptiveEntropyController(
     start_lambda=0.01, 
     min_lambda=0.002, 
-    decay_epochs=(15, 30, 50)
-)
+    decay_epochs=(15, 30, 50))
+
+fusion_logs = []
+
+def log_fusion_behavior(epoch, gate_scores_batch, logs):
+    with torch.no_grad():
+        pra_conf = gate_scores_batch[:, 0]
+        app_conf = gate_scores_batch[:, 1]
+        avg_pra = pra_conf.mean().item()
+        avg_app = app_conf.mean().item()
+        conf_gap = (pra_conf - app_conf).abs().mean().item()
+
+        fusion_logs.append({
+            'epoch': epoch,
+            'avg_pra_conf': avg_pra,
+            'avg_app_conf': avg_app,
+            'avg_confidence_gap': conf_gap
+        })
+        pd.DataFrame(fusion_logs).to_csv(logs, index=False)
+
 # --------------------------
 # Fungsi Augmentasi MixUp & CutMix
 # --------------------------
@@ -86,7 +104,7 @@ def train(args):
     checkpoint_path = os.path.join(args.output_dir, f'{args.model}_{args.dataset}_last.pt')
     base_path = os.path.join(args.output_dir, f'{args.model}_{args.dataset}_best.pt')
     log_file = os.path.join(args.output_dir, f'{args.model}_{args.dataset}_log.csv')
-    
+    log_fusion = os.path.join(args.output_dir, f'{args.model}_{args.dataset}_log_fusion.csv')
     if args.optimizer == 'adamw':
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     else:
@@ -198,7 +216,10 @@ def train(args):
                     loss = loss_cls + lambda_entropy * (1 - entropy_loss)
                 else:
                     loss = loss_cls
-                
+                    
+            if gate_scores is not None:
+                log_fusion_behavior(epoch, gate_scores,log_fusion)
+        
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -257,7 +278,7 @@ def train(args):
         val_loss_avg = val_loss / len(val_loader)
         scheduler.step(val_loss)
         
-        print(f"\nEpoch {epoch+1}: Loss:{loss_cls.item():.4f} | Entropy:{lambda_entropy:.4f} | gate score:{gate_scores} | Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}% | Val Loss: {val_loss_avg:.4f}")
+        print(f"\nEpoch {epoch+1}: Loss:{loss_cls.item():.4f} | Entropy:{lambda_entropy:.4f} | Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}% | Val Loss: {val_loss_avg:.4f}")
     
         torch.save({
             'epoch': epoch + 1,
@@ -294,7 +315,9 @@ def train(args):
             'scaler_state_dict': scaler.state_dict(),
             'best_acc': best_acc
         }, checkpoint_path)
-        
+
+
+
 
 # ⛳ Entry Point
 if __name__ == "__main__":
@@ -313,5 +336,6 @@ if __name__ == "__main__":
     parser.add_argument('--model', type=str, default='ddga', choices=['ddga','fusion','drm'])
     parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sgd'])
     args = parser.parse_args()
-
+    
     train(args)
+    

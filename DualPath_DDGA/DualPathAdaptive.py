@@ -3,9 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm import create_model
 import os, csv
-from module import (D_PRA, 
-                    AdaptiveContextAPP, 
-                    DSE_Local, 
+from .modules import DPRA_Enhanced, AdaptiveContextPooling, UniversalFusion 
+from module import (D_PRA, AdaptiveContextAPP, DynamicGridDSE, PRA_MultiheadAttention,
+                    DSE_Local, SE_Block, SE_Global,
                     ConfidenceAwareFusion,
                     DynamicRecalibration)
 
@@ -77,7 +77,6 @@ class SimpleSumFusion(nn.Module):
 
     def forward(self, local_feat, global_feat):
         return local_feat + global_feat
-
 
 # ==== Final DualPathModel for Ablation ====
 class DualPathAdaptiveAblation(nn.Module):
@@ -165,17 +164,92 @@ class DualPathAdaptiveAblation(nn.Module):
         out = self.classifier(self.dropout(pooled))
 
         return out
-                        
+
+# ==== Base DualPathModel Fusion ====
+class BaselineFinal(nn.Module):
+    def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', pretrained=True, 
+                 in_channels=3, fusion_mode='cross_gate', use_drm=False, use_se=False):
+        """
+        BaselineFinal:
+        - Dual Pathway: Local (DPRA_Enhanced) + Global (AdaptiveContextPooling)
+        - Fusion via UniversalFusion (supports cross_gate or confidence)
+        - Optional post-fusion Dynamic Recalibration and SE Block
+        
+        Args:
+            num_classes: output class number
+            backbone_name: backbone network (default efficientvit_b1)
+            pretrained: use pretrained backbone
+            in_channels: input channel (default RGB 3)
+            fusion_mode: 'cross_gate' or 'confidence'
+            use_drm: use Dynamic Recalibration Module after fusion
+            use_se: use SE Block after fusion
+        """
+        super(BaselineFinal, self).__init__()
+        self.use_drm = use_drm
+        self.use_se = use_se
+
+        # Backbone feature extractor
+        self.backbone = create_model(backbone_name, pretrained=pretrained, features_only=True, in_chans=in_channels)
+        self.feature_dim = self.backbone.feature_info[-1]['num_chs']
+
+        # Local and Global Branch
+        self.local_branch = DPRA_Enhanced(embed_dim=self.feature_dim)
+        self.global_branch = AdaptiveContextPooling(dim=self.feature_dim)
+
+        # Fusion Module
+        self.fusion = UniversalFusion(feature_dim=self.feature_dim, fusion_mode=fusion_mode)
+
+        # Post-Fusion Enhancement Modules
+        if use_drm:
+            self.drm = DynamicRecalibration(channels=self.fusion.out_channels)
+        if use_se:
+            self.se_fusion = SE_Block(in_channels=self.fusion.out_channels)
+
+        # Classifier
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(0.3)
+        self.classifier = nn.Linear(self.fusion.out_channels, num_classes)
+
+    def forward(self, x):
+        feat = self.backbone(x)[-1]  # Output: [B, C, H, W]
+        B, C, H, W = feat.size()
+
+        # Local Pathway (DPRA Enhanced)
+        pra_feat = self.local_branch(feat)
+        pra_feat = pra_feat.transpose(1, 2).view(B, C, H, W)
+
+        # Global Pathway (Adaptive Context Pooling)
+        app_feat = self.global_branch(feat)
+
+        # Align spatial size if necessary
+        if pra_feat.size()[2:] != app_feat.size()[2:]:
+            app_feat = F.interpolate(app_feat, size=pra_feat.shape[2:], mode='bilinear', align_corners=False)
+
+        # Fusion
+        fused_feat = self.fusion(pra_feat, app_feat)
+
+        # Post-Fusion Dynamic Recalibration
+        if self.use_drm:
+            fused_feat = self.drm(fused_feat)
+
+        # Post-Fusion SE Block
+        if self.use_se:
+            fused_feat = self.se_fusion(fused_feat)
+
+        # Pooling and Classification
+        pooled = self.global_pool(fused_feat).flatten(1)
+        out = self.classifier(self.dropout(pooled))
+
+        return out
+                    
 # ==== Final DualPathModel ====
 class DualPathAdaptive(nn.Module):
     def __init__(self, num_classes=7,
                  backbone_name='efficientvit_b1.r224_in1k', pretrained=True, 
-                 in_channels=3, use_drm=True, verbose=False, log_csv_path=None):
+                 in_channels=3, use_drm=True):
         super().__init__()
         
         self.use_drm = use_drm
-        self.verbose = verbose
-        self.log_csv_path = log_csv_path
         self.step_counter = 0
         
         self.backbone = create_model(
@@ -199,37 +273,12 @@ class DualPathAdaptive(nn.Module):
         self.dropout = nn.Dropout(0.3)
         self.classifier = nn.Linear(self.feature_dim, num_classes)
 
-        if self.log_csv_path:
-            # Buat foldernya kalau belum ada
-            folder = os.path.dirname(log_csv_path)
-            if folder and not os.path.exists(folder):
-                os.makedirs(folder)
-            
-            # Inisialisasi CSV file header
-            if not os.path.exists(log_csv_path):
-                with open(log_csv_path, 'w', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow([
-                        'Step', 'PAM_Mean', 'PRA_Mean', 'APP_Mean', 
-                        'Fusion_Mean', 'DRM_Mean', 'Fusion_Alpha_PRA', 'Fusion_Beta_APP'
-                    ])
-
-    def log_to_csv(self, pam_mean, pra_mean, app_mean, fusion_mean, drm_mean, alpha, beta):
-            if self.log_csv_path:
-                with open(self.log_csv_path, 'a', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow([
-                        self.step_counter, pam_mean, pra_mean, app_mean,
-                        fusion_mean, drm_mean, alpha, beta
-                    ])
-                self.step_counter += 1
-            
+       
     def forward(self, x):
         feat = self.backbone(x)[-1]  # [B, C, H, W]
         B, C, H, W = feat.size()
         
         feat = self.pam(feat)
-        pam_mean = feat.mean().item()
 
         # Local Branch
         pra_feat = self.pra(feat)
@@ -237,39 +286,87 @@ class DualPathAdaptive(nn.Module):
         H = W = int(seq_len ** 0.5)
         pra_feat = pra_feat.transpose(1, 2).view(B, C, H, W)
         pra_feat = self.dse_local(pra_feat)
-        pra_mean = pra_feat.mean().item()
-
+    
         # Global Branch
         app_feat = self.app(feat)
-        app_mean = app_feat.mean().item()
-
+    
         # Fusion
-        fused_feat, alpha, beta = self.conf_fusion(pra_feat, app_feat)
-        fusion_mean = fused_feat.mean().item()
+        if pra_feat.size()[2:] != app_feat.size()[2:]:
+            app_feat = F.interpolate(app_feat, size=pra_feat.shape[2:], mode='bilinear', align_corners=False)
+
+        fused_feat = self.conf_fusion(pra_feat, app_feat)
+
 
         # DRM
         if self.use_drm:
             fused_feat = self.drm(fused_feat)
-        drm_mean = fused_feat.mean().item() if self.use_drm else 0
+    
+        pooled = self.global_pool(fused_feat).flatten(1)
+        out = self.classifier(self.dropout(pooled))
+
+        return out
+
+class DualPathAdaptivePlus(nn.Module):
+    def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', pretrained=True, 
+                 in_channels=3, use_drm=False):
+        super().__init__()
+        self.use_drm = use_drm
+
+        self.backbone = create_model(backbone_name, pretrained=pretrained, features_only=True, in_chans=in_channels)
+        self.feature_dim = self.backbone.feature_info[-1]['num_chs']
         
-        if self.verbose:
-            self.log_feature("PAM Output", feat)
-            self.log_feature("D-PRA + DSE_Local Output", pra_feat)
-            self.log_feature("AdaptiveContextAPP Output", app_feat)
-            self.log_feature("Fusion Output", fusion_mean)
-            self.log_feature("DRM", drm_mean)
-            
-        # Log to CSV
-        self.log_to_csv(
-            pam_mean, pra_mean, app_mean, fusion_mean, drm_mean,
-            alpha.mean().item(), beta.mean().item()
-        )
+        self.pam = PartialAttentionMasking(masking_ratio=0.5, strategy="channel_entropy")
+        self.dynamic_grid_dse =  DynamicGridDSE(in_channels=self.feature_dim, out_channels=self.feature_dim)
+
+        self.pra = D_PRA(embed_dim=self.feature_dim)
+        #self.dse_local = DSE_Local(in_channels=self.feature_dim, out_channels=self.feature_dim)
+
+        self.app = AdaptiveContextAPP(dim=self.feature_dim)
+        #self.dse_global = DSE_Global(in_channels=self.feature_dim, out_channels=self.feature_dim)
+
+        self.fusion = ConfidenceAwareFusion(feature_dim=self.feature_dim)
+
+        if use_drm:
+            self.drm = DynamicRecalibration(channels=self.feature_dim * 2)
+
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(0.3)
+        self.classifier = nn.Linear(self.feature_dim * 2, num_classes)
+
+    def forward(self, x):
+        feat = self.backbone(x)[-1]  # [B, C, H, W]
+        B, C, H, W = feat.size()
+        
+        feat = self.pam(feat)
+        feat = self.dynamic_grid_dse(feat)
+
+        # Local Branch
+        pra_feat = self.pra(feat)
+        B, seq_len, C = pra_feat.size()
+        H = W = int(seq_len ** 0.5)
+        pra_feat = pra_feat.transpose(1, 2).view(B, C, H, W)
+        #pra_feat = self.dse_local(pra_feat)
+
+        # Global Branch
+        app_feat = self.app(feat)
+        #app_feat = self.dse_global(app_feat)
+
+        if pra_feat.size()[2:] != app_feat.size()[2:]:
+            app_feat = F.interpolate(app_feat, size=pra_feat.shape[2:], mode='bilinear', align_corners=False)
+
+        fused_feat = self.fusion(pra_feat, app_feat)
+
+        if self.use_drm:
+            fused_feat = self.drm(fused_feat)
 
         pooled = self.global_pool(fused_feat).flatten(1)
         out = self.classifier(self.dropout(pooled))
 
         return out
 
+        # Notes:
+        # - create_model, DynamicGridDSEPlus, D_PRA, DSE_Local, AdaptiveContextAPP, DSE_Global, CrossLevelDualGatedAttention, DynamicRecalibration must be defined/imported.
+        # - This model is clean and ready for training or deployment.
 # ==== Dummy Data Test ====
 if __name__ == "__main__":
     # Dummy Input

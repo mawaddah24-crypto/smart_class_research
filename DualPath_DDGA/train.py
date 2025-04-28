@@ -7,6 +7,7 @@ import torch.amp
 import torch.nn as nn
 import torch.optim as optim
 from torch.amp import GradScaler
+from timm.scheduler import CosineLRScheduler
 from torch.utils.data import DataLoader
 from torchvision import transforms,datasets
 from tqdm import tqdm
@@ -101,8 +102,8 @@ def train(args):
         optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=1e-4, momentum=0.9)
     
     #optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
-    
+    #scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
+    scheduler = CosineLRScheduler(optimizer, t_initial=args.epochs, lr_min=1e-5)
     # 🧠 Load EfficientViT pretrained dari VGGFace2
     if args.backbone_weights:
         load_pretrained_backbone(model, args.backbone_weights)
@@ -150,7 +151,7 @@ def train(args):
     if os.path.exists(checkpoint_path):
         print(f"🔁 Auto-loading last checkpoint from: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device,weights_only=True)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scaler.load_state_dict(checkpoint['scaler_state_dict'])
         best_acc = checkpoint.get('best_acc', best_acc)
@@ -167,10 +168,10 @@ def train(args):
             set_backbone_trainable(model, False)
         else:
             set_backbone_trainable(model, True)
-            model.delay_ddga=False
         
         if epoch > 5:
             model.delay_ddga=False
+            print(f"🔍 Dual Dynamic Gated Attention Fusion ✅ Aktif")
             
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{args.epochs}]", unit='batch')
         for batch_idx, (imgs, labels) in enumerate(loop):
@@ -286,5 +287,5 @@ if __name__ == "__main__":
                                                                           'base'])
     parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sgd'])
     args = parser.parse_args()
-
+    print(f"✅ Konfigurasi : {args}")
     train(args)

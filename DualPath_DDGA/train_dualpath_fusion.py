@@ -9,6 +9,7 @@ import torch.optim as optim
 from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 from torchvision import transforms,datasets
+from timm.scheduler import CosineLRScheduler
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
@@ -79,14 +80,15 @@ def train(args):
         optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=1e-4, momentum=0.9)
     
     #optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
+    #scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
+    scheduler = CosineLRScheduler(optimizer, t_initial=args.epochs, lr_min=1e-5)
     
     # 🧠 Load EfficientViT pretrained dari VGGFace2
     if args.backbone_weights:
         load_pretrained_backbone(model, args.backbone_weights)
 
-    #criterion = nn.CrossEntropyLoss()
-    criterion = FocalLoss(gamma=2.0)
+    criterion = nn.CrossEntropyLoss()
+    #criterion = FocalLoss(gamma=2.0)
     scaler = GradScaler(device='cuda')
 
     # 📦 Dataset
@@ -252,5 +254,5 @@ if __name__ == "__main__":
     parser.add_argument('--model', type=str, default='semfusion', choices=['semfusion', 'baseline'])
     parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sgd'])
     args = parser.parse_args()
-
+    print(f"✅ Konfigurasi: {args}")
     train(args)

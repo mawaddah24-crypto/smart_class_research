@@ -81,6 +81,43 @@ class SemanticAwarePartialAttention(nn.Module):
 
         return feat
 
+class DynamicGridDSEPlus(nn.Module):
+    def __init__(self, in_channels, out_channels=None, grid_sizes=[2, 4, 8]):
+        super(DynamicGridDSEPlus, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels if out_channels else in_channels
+        self.grid_sizes = grid_sizes
+
+        self.attention_blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(self.in_channels, self.out_channels // 4, kernel_size=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(self.out_channels // 4, self.out_channels, kernel_size=1),
+                nn.Sigmoid()
+            ) for _ in grid_sizes
+        ])
+
+        self.final_fusion = nn.Conv2d(self.out_channels, self.out_channels, kernel_size=1)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        attention_maps = []
+
+        for i, grid_size in enumerate(self.grid_sizes):
+            pooled = F.adaptive_avg_pool2d(x, output_size=(grid_size, grid_size))
+            attn = self.attention_blocks[i](pooled)
+            attn = F.interpolate(attn, size=(H, W), mode='bilinear', align_corners=False)
+            attention_maps.append(attn)
+
+        fused_attention = torch.stack(attention_maps, dim=0).mean(dim=0)  # average across grid scales
+        fused_attention = self.final_fusion(fused_attention)
+        fused_attention = torch.sigmoid(fused_attention)
+
+        out = x * fused_attention
+        out = out + x  # residual connection
+
+        return out
+
 class DynamicGridDSE(nn.Module):
     def __init__(self, in_channels, out_channels, grid_size=2):
         super(DynamicGridDSE, self).__init__()
@@ -463,6 +500,51 @@ class FeatureAwareDDGA(nn.Module):
 
         return fused_feat, entropy_loss
     
+# Dual Dynamic Gated Attention Fusion Entropy Regularization Calculation
+class DDGA_Entropy(nn.Module):
+    def __init__(self, dim):
+        super(DDGA_Entropy, self).__init__()
+        self.gate_local = nn.Sequential(
+            nn.Conv2d(dim, dim, kernel_size=1),
+            nn.BatchNorm2d(dim),
+            nn.Sigmoid()
+        )
+        self.gate_global = nn.Sequential(
+            nn.Conv2d(dim, dim, kernel_size=1),
+            nn.BatchNorm2d(dim),
+            nn.Sigmoid()
+        )
+        self.fusion = nn.Conv2d(dim * 2, dim, kernel_size=1)
+
+    def forward(self, local_feat, global_feat):
+        # Gated local and global feature maps
+        l_gate = self.gate_local(local_feat) * local_feat
+        g_gate = self.gate_global(global_feat) * global_feat
+
+        # 🔥 Adjust size if needed (upsampling global_feat)
+        if l_gate.size()[2:] != g_gate.size()[2:]:
+            g_gate = F.interpolate(g_gate, size=(l_gate.size(2), l_gate.size(3)), mode='bilinear', align_corners=False)
+
+        # Fuse gated features
+        fused = torch.cat([l_gate, g_gate], dim=1)
+        fused = self.fusion(fused)
+
+        # 🔥 Entropy Regularization Calculation
+        # Take the gating maps before element-wise multiplication
+        l_score = self.gate_local(local_feat)
+        g_score = self.gate_global(global_feat)
+
+        # Normalize scores to probability distribution per location
+        total_score = l_score + g_score + 1e-8  # Avoid division by zero
+        l_prob = l_score / total_score
+        g_prob = g_score / total_score
+
+        # Entropy per pixel
+        entropy_map = -(l_prob * torch.log(l_prob + 1e-8) + g_prob * torch.log(g_prob + 1e-8))
+        entropy_loss = entropy_map.mean()
+
+        return fused, entropy_loss
+
 # === DSF-DDGA (Dynamic Soft Fusion Dual Gating Attention) ===
 class DDGA_DSF(nn.Module):
     def __init__(self, feature_dim, use_attention=False):
@@ -517,51 +599,6 @@ class DDGA_DSF(nn.Module):
 
         return fused_feat, entropy, gate_scores
     
-# Dual Dynamic Gated Attention Fusion Entropy Regularization Calculation
-class DDGA_Entropy(nn.Module):
-    def __init__(self, dim):
-        super(DDGA_Entropy, self).__init__()
-        self.gate_local = nn.Sequential(
-            nn.Conv2d(dim, dim, kernel_size=1),
-            nn.BatchNorm2d(dim),
-            nn.Sigmoid()
-        )
-        self.gate_global = nn.Sequential(
-            nn.Conv2d(dim, dim, kernel_size=1),
-            nn.BatchNorm2d(dim),
-            nn.Sigmoid()
-        )
-        self.fusion = nn.Conv2d(dim * 2, dim, kernel_size=1)
-
-    def forward(self, local_feat, global_feat):
-        # Gated local and global feature maps
-        l_gate = self.gate_local(local_feat) * local_feat
-        g_gate = self.gate_global(global_feat) * global_feat
-
-        # 🔥 Adjust size if needed (upsampling global_feat)
-        if l_gate.size()[2:] != g_gate.size()[2:]:
-            g_gate = F.interpolate(g_gate, size=(l_gate.size(2), l_gate.size(3)), mode='bilinear', align_corners=False)
-
-        # Fuse gated features
-        fused = torch.cat([l_gate, g_gate], dim=1)
-        fused = self.fusion(fused)
-
-        # 🔥 Entropy Regularization Calculation
-        # Take the gating maps before element-wise multiplication
-        l_score = self.gate_local(local_feat)
-        g_score = self.gate_global(global_feat)
-
-        # Normalize scores to probability distribution per location
-        total_score = l_score + g_score + 1e-8  # Avoid division by zero
-        l_prob = l_score / total_score
-        g_prob = g_score / total_score
-
-        # Entropy per pixel
-        entropy_map = -(l_prob * torch.log(l_prob + 1e-8) + g_prob * torch.log(g_prob + 1e-8))
-        entropy_loss = entropy_map.mean()
-
-        return fused, entropy_loss
-        
 # === Dual Dynamic Gated Attention Fusion ===
 class DDGA(nn.Module):
     def __init__(self, dim):
@@ -604,7 +641,8 @@ class ConfidenceAwareFusion(nn.Module):
         beta = global_conf / sum_conf
 
         fused = alpha.view(-1, 1, 1, 1) * local_feat + beta.view(-1, 1, 1, 1) * global_feat
-        return fused
+        
+        return fused, alpha, beta
     
 # === Cross Dual Dynamic Gated Attention Fusion ===
 class CrossLevelDualGatedAttention(nn.Module):
