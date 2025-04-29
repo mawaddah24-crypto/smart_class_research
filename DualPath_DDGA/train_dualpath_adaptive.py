@@ -261,7 +261,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='RAF-DB')
     parser.add_argument('--data_dir', type=str, default='../dataset/')
-    parser.add_argument("--output_dir", type=str, default="adaptive")
+    parser.add_argument("--output_dir", type=str, default="logs")
     parser.add_argument("--backbone_weights", type=str, default="./weights/efficientvit_vggface2_best.pth")
     parser.add_argument("--num_classes", type=int, default=7)
     parser.add_argument("--batch_size", type=int, default=64)
