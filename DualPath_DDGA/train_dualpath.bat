@@ -1,32 +1,23 @@
 @echo off
 echo ==========================================================
-echo 🔥 Training DualPath_PartialAttention_Modified on RAF-DB
-python train.py --model partialmodif --dataset RAF-DB --output_dir logs/partialmodif_rafdb
+echo 🔥 Training DualPath Adaptive on RAF-DB
+python train_dualpath_adaptive.py
 
 echo ==========================================================
-echo 🔥 Training DualPath_PartialAttention_SAP on RAF-DB
-python train.py --model semantic --dataset RAF-DB --output_dir logs/semantic_rafdb
+echo 🔥 Training DualPath Context Residual DRM on RAF-DB
+python train.py --model crdrm
 
 echo ==========================================================
-echo 🔥 Training DualPath_Simplified on RAF-DB
-python train.py --model base --dataset RAF-DB --output_dir logs/simplified_rafdb
-
-
-echo ==========================================================
-echo 🔥 Training DualPath_Baseline on RAF-DB
-python train.py --model dual --dataset RAF-DB --output_dir logs/dual_rafdb
+echo 🔥 Training DualPath Fusion on RAF-DB
+python train.py --model fusion
 
 echo ==========================================================
-echo 🔥 Training DualPath_Baseline on RAF-DB
-python train.py --model baseline --dataset RAF-DB --output_dir logs/baseline_rafdb
+echo 🔥 Training DualPath Sem Fusion on RAF-DB
+python train_dualpath_fusion.py
 
 echo ==========================================================
-echo 🔥 Training DualPath_PartialAttention (standard) on RAF-DB
-python train.py --model partial --dataset RAF-DB --output_dir logs/partial_rafdb
-
-echo ==========================================================
-echo 🔥 Training DualPath_Baseline_DSE on RAF-DB
-python train.py --model dse --dataset RAF-DB --output_dir logs/semantic_rafdb
+echo 🔥 Training DualPath Baseline on RAF-DB
+python train.py
 
 echo ✅ All Trainings Completed Successfully!
 pause

@@ -1,0 +1,36 @@
+dataset:
+  name: RAF-DB
+  train_dir: ./data/rafdb/train
+  val_dir: ./data/rafdb/val
+
+input_size: 224
+batch_size: 32
+epochs: 150
+lr: 0.0003
+weight_decay: 1e-4
+early_stopping_patience: 10
+
+scheduler: plateau
+warmup_epochs: 5
+min_lr: 1e-6
+
+# Untuk step dan multistep scheduler
+step_size: 10
+milestones: [30, 60, 90]
+gamma: 0.1
+
+# Untuk plateau
+plateau_patience: 10
+gamma: 0.1
+min_lr: 1e-6
+
+augmentation:
+  random_horizontal_flip: true
+  random_rotation: 15
+  color_jitter: true
+  random_resized_crop: true
+
+checkpoint_dir: checkpoints/
+log_dir: logs/
+save_last: true
+save_best: true

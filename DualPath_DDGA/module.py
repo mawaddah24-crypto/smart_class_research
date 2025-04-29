@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 # === Advanced PartialAttentionMasking ===
 class AdvancedPartialAttentionMasking(nn.Module):
-    def __init__(self, masking_ratio=0.5, strategy="entropy_topk"):
+    def __init__(self, masking_ratio=0.3, strategy="entropy_topk"):
         super(AdvancedPartialAttentionMasking, self).__init__()
         self.masking_ratio = masking_ratio
         self.strategy = strategy
@@ -42,7 +42,7 @@ class AdvancedPartialAttentionMasking(nn.Module):
         
 # === Modified PartialAttentionMasking in SemanticAwarePartialAttention ===
 class SemanticAwarePartialAttention(nn.Module):
-    def __init__(self, masking_ratio=0.5, topk_semantic=True):
+    def __init__(self, masking_ratio=0.3, topk_semantic=True):
         super(SemanticAwarePartialAttention, self).__init__()
         self.masking_ratio = masking_ratio
         self.topk_semantic = topk_semantic
@@ -643,7 +643,63 @@ class ConfidenceAwareFusion(nn.Module):
         fused = alpha.view(-1, 1, 1, 1) * local_feat + beta.view(-1, 1, 1, 1) * global_feat
         
         return fused, alpha, beta
-    
+
+class ConfidenceAwareFusionV2(nn.Module):
+    def __init__(self, feature_dim, warmup_epochs=5):
+        """
+        feature_dim : jumlah channel dari input local_feat dan global_feat
+        warmup_epochs : berapa epoch awal menggunakan warmup simple fusion
+        """
+        super().__init__()
+        
+        # Lightweight attention
+        self.local_attention = nn.Sequential(
+            nn.Conv2d(feature_dim, feature_dim // 8, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(feature_dim // 8, feature_dim, kernel_size=1),
+            nn.Sigmoid()
+        )
+        self.global_attention = nn.Sequential(
+            nn.Conv2d(feature_dim, feature_dim // 8, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(feature_dim // 8, feature_dim, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+        self.local_pool = nn.AdaptiveAvgPool2d(1)
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+
+        self.warmup_epochs = warmup_epochs
+        self.current_epoch = 0  # Diupdate dari training loop
+
+    def forward(self, local_feat, global_feat):
+        # Apply lightweight attention
+        local_feat_att = local_feat * self.local_attention(local_feat)
+        global_feat_att = global_feat * self.global_attention(global_feat)
+
+        # Pooling
+        local_conf = self.local_pool(local_feat_att).view(local_feat.size(0), -1).mean(dim=1, keepdim=True)
+        global_conf = self.global_pool(global_feat_att).view(global_feat.size(0), -1).mean(dim=1, keepdim=True)
+
+        # Compute alpha-beta
+        sum_conf = local_conf + global_conf + 1e-6
+        alpha = local_conf / sum_conf
+        beta = global_conf / sum_conf
+
+        # Warm-up hanya aktif saat training + early epoch
+        if self.training and self.current_epoch < self.warmup_epochs:
+            alpha = beta = 0.5 * torch.ones_like(alpha)
+
+        # Fusion
+        fused = alpha.view(-1, 1, 1, 1) * local_feat + beta.view(-1, 1, 1, 1) * global_feat
+
+        return fused, alpha, beta
+
+    def set_epoch(self, epoch):
+        """Method untuk update current_epoch dari training loop."""
+        self.current_epoch = epoch
+
+
 # === Cross Dual Dynamic Gated Attention Fusion ===
 class CrossLevelDualGatedAttention(nn.Module):
     def __init__(self, dim):

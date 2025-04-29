@@ -13,16 +13,29 @@ from torchvision import transforms,datasets
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
-from DualPathModel import (DualPath_Base_Partial, 
-                           DualPath_Baseline_DSE,
-                           DualPath_Baseline,
-                           DualPath, 
-                           DualPath_Simplified,
-                           DualPath_PartialAttentionModif,
-                           DualPath_PartialAttentionSAP)
+from DualPathModel import DualPath_Baseline, DualPath_Fusion, DualPath_CR_DRM
+import torchvision.transforms.functional as TF
+
 from loaders import load_pretrained_backbone
 #from FERLandmarkDataset import FERLandmarkCachedDataset  # Sesuaikan ini
 from FocalLoss import FocalLoss
+
+# === Cosine Warmup Scheduler ===
+class CosineWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
+    def __init__(self, optimizer, warmup_epochs, max_epochs, min_lr=1e-6, last_epoch=-1):
+        self.warmup_epochs = warmup_epochs
+        self.max_epochs = max_epochs
+        self.min_lr = min_lr
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        if self.last_epoch < self.warmup_epochs:
+            return [base_lr * (self.last_epoch + 1) / self.warmup_epochs for base_lr in self.base_lrs]
+        else:
+            progress = (self.last_epoch - self.warmup_epochs) / (self.max_epochs - self.warmup_epochs)
+            cosine_decay = 0.5 * (1 + torch.cos(torch.tensor(progress * 3.1415926535)))
+            return [self.min_lr + (base_lr - self.min_lr) * cosine_decay for base_lr in self.base_lrs]
+        
 # --------------------------
 # Fungsi Augmentasi MixUp & CutMix
 # --------------------------
@@ -75,21 +88,11 @@ def train(args):
     # 🔧 Inisialisasi model
     if args.model == "baseline":
         model = DualPath_Baseline(num_classes=args.num_classes, pretrained=True)
-    elif args.model == "dse":
-        model = DualPath_Baseline_DSE(num_classes=args.num_classes, pretrained=True)
-    elif args.model == "partial":
-        model = DualPath_Base_Partial(num_classes=args.num_classes, pretrained=True)
-    elif args.model == "partialmodif":
-        model = DualPath_PartialAttentionModif(num_classes=args.num_classes, pretrained=True)
-    elif args.model == "semantic":
-        model = DualPath_PartialAttentionSAP(num_classes=args.num_classes, pretrained=True)
-    elif args.model == "dual":
-        model = DualPath(num_classes=args.num_classes, pretrained=True)
-    elif args.model == "base":
-        model = DualPath_Simplified(num_classes=args.num_classes, pretrained=True)
+    elif args.model == "fusion":
+        model = DualPath_Fusion(num_classes=args.num_classes, pretrained=True)
     else:
-        raise ValueError(f"Unknown model type {args.model}")
-
+        model = DualPath_CR_DRM(num_classes=args.num_classes, pretrained=True)
+        
     model.to(device)
     
     checkpoint_path = os.path.join(args.output_dir, f'{args.model}_{args.dataset}_last.pt')
@@ -102,8 +105,9 @@ def train(args):
         optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=1e-4, momentum=0.9)
     
     #optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    #scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
-    scheduler = CosineLRScheduler(optimizer, t_initial=args.epochs, lr_min=1e-5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
+    #scheduler = CosineLRScheduler(optimizer, t_initial=args.epochs, lr_min=1e-5)
+    #scheduler = CosineWarmupScheduler(optimizer, warmup_epochs=5, max_epochs=args.epochs, min_lr=1e-5)
     # 🧠 Load EfficientViT pretrained dari VGGFace2
     if args.backbone_weights:
         load_pretrained_backbone(model, args.backbone_weights)
@@ -112,7 +116,17 @@ def train(args):
     criterion = FocalLoss(gamma=2.0)
     scaler = GradScaler(device='cuda')
 
-    # 📦 Dataset
+    train_transforms1 = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(degrees=20),
+        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+        transforms.RandomApply([transforms.GaussianBlur(kernel_size=5)], p=0.3),  # Blur setelah color jitter
+        transforms.RandomErasing(p=0.3, scale=(0.02, 0.2)),  # Erasing applied after tensor
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
     train_transforms = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),  # Konversi ke Tensor harus di awal!
@@ -161,17 +175,24 @@ def train(args):
 
     for epoch in range(start_epoch, args.epochs):
         model.train()
+        
+        if args.model == "crdrm":
+            model.update_confidence_epoch(epoch)  # Ini penting!
+            
         running_loss = 0.0
         correct = 0
         total = 0
-        if epoch < 3:
+        if epoch < 4:
             set_backbone_trainable(model, False)
         else:
             set_backbone_trainable(model, True)
         
-        if epoch > 5:
-            model.delay_ddga=False
-            print(f"🔍 Dual Dynamic Gated Attention Fusion ✅ Aktif")
+        if args.model == "baseline":
+            if epoch < 5:
+                model.delay_ddga = False
+                print(f"⏹️ Dual Dynamic Gated Attention Fusion Non Aktif")
+            else:
+                print(f"✅ Dual Dynamic Gated Attention Fusion Aktif ")
             
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{args.epochs}]", unit='batch')
         for batch_idx, (imgs, labels) in enumerate(loop):
@@ -227,10 +248,9 @@ def train(args):
         val_acc = 100 * val_correct / val_total
         val_loss_avg = val_loss / len(val_loader)
         scheduler.step(val_loss)
+        #scheduler.step()
         print(f"\nEpoch {epoch+1}: Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}% | Val Loss: {val_loss_avg:.4f}")
         
-        
-                        
         torch.save({
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
@@ -273,19 +293,17 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='RAF-DB')
-    parser.add_argument('--data_dir', type=str, default='../dataset_cropped_yolo/')
-    parser.add_argument("--output_dir", type=str, default="logs")
+    parser.add_argument('--data_dir', type=str, default='../dataset/')
+    parser.add_argument("--output_dir", type=str, default="logs/")
     parser.add_argument("--backbone_weights", type=str, default="./weights/efficientvit_vggface2_best.pth")
     parser.add_argument("--num_classes", type=int, default=7)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--early_stop", type=int, default=10)
-    parser.add_argument('--model', type=str, default='baseline', choices=['dse', 'baseline',
-                                                                          'partialmodif','partial',
-                                                                          'semantic','dual',
-                                                                          'base'])
+    parser.add_argument('--model', type=str, default='baseline', choices=['baseline','fusion','crdrm'])
     parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sgd'])
+    parser.add_argument('--ddga', action='store_true', help="Dynamic attention to fuse both pathways")
     args = parser.parse_args()
     print(f"✅ Konfigurasi : {args}")
     train(args)

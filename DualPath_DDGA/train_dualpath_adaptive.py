@@ -13,7 +13,7 @@ from tqdm import tqdm
 import pandas as pd
 import numpy as np
 from timm.scheduler import CosineLRScheduler
-from DualPathAdaptive import DualPathAdaptive, DualPathAdaptivePlus, BaselineFinal
+from DualPathAdaptive import BaselineFinal
 from loaders import load_pretrained_backbone
 #from FERLandmarkDataset import FERLandmarkCachedDataset  # Sesuaikan ini
 from FocalLoss import FocalLoss
@@ -84,14 +84,7 @@ def train(args):
     
     
     # 🔧 Inisialisasi model
-    if args.model == "baseline":
-        model = BaselineFinal(num_classes=args.num_classes, pretrained=True)
-    elif args.model == "semfusion":
-        model = DualPathAdaptivePlus(num_classes=args.num_classes, pretrained=True)
-    elif args.model == "adaptiv":
-        model = DualPathAdaptive(num_classes=args.num_classes, pretrained=True)
-    else:
-        raise ValueError(f"Unknown model type {args.model}")
+    model = BaselineFinal(num_classes=args.num_classes, pretrained=True)
     model.to(device)
     
     checkpoint_path = os.path.join(args.output_dir, f'{args.model}_{args.dataset}_last.pt')
@@ -103,9 +96,9 @@ def train(args):
     else:
         optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=1e-4, momentum=0.9)
     
-    #scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
     #scheduler = CosineWarmupScheduler(optimizer, warmup_epochs=5, max_epochs=args.epochs, min_lr=1e-5)
-    scheduler = CosineLRScheduler(optimizer, t_initial=args.epochs, lr_min=1e-5)
+    #scheduler = CosineLRScheduler(optimizer, t_initial=args.epochs, lr_min=1e-5)
     # 🧠 Load EfficientViT pretrained dari VGGFace2
     if args.backbone_weights:
         load_pretrained_backbone(model, args.backbone_weights)
@@ -221,7 +214,7 @@ def train(args):
                 
         val_acc = 100 * val_correct / val_total
         val_loss_avg = val_loss / len(val_loader)
-        scheduler.step()
+        scheduler.step(val_loss)
         print(f"\nEpoch {epoch+1}: Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}% | Val Loss: {val_loss_avg:.4f}")
         
 
@@ -267,7 +260,7 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='RAF-DB')
-    parser.add_argument('--data_dir', type=str, default='../dataset_cropped_yolo/')
+    parser.add_argument('--data_dir', type=str, default='../dataset/')
     parser.add_argument("--output_dir", type=str, default="adaptive")
     parser.add_argument("--backbone_weights", type=str, default="./weights/efficientvit_vggface2_best.pth")
     parser.add_argument("--num_classes", type=int, default=7)
@@ -275,7 +268,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--early_stop", type=int, default=10)
-    parser.add_argument('--model', type=str, default='baseline', choices=['semfusion', 'baseline'])
+    parser.add_argument('--model', type=str, default='adaptive', choices=['adaptive', 'baseline','sem'])
     parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sgd'])
     args = parser.parse_args()
     print(f"✅ Konfigurasi Model: {args}")

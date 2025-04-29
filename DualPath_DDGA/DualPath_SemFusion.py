@@ -48,7 +48,7 @@ class SEBlock_Global(nn.Module):
         se = self.sigmoid(se)
         return x * se
 
-    # ====== CrossLevelSEBlock ======
+# ====== CrossLevelSEBlock ======
 class CrossLevelSEBlock(nn.Module):
     def __init__(self, in_channels, reduction=16, grid_size=2):
         super(CrossLevelSEBlock, self).__init__()
@@ -71,13 +71,12 @@ class CrossLevelSEBlock(nn.Module):
         out = torch.cat([local_feat, global_feat], dim=1)
 
         return out
+
+
 class DualPath_SemFusion(nn.Module):
     def __init__(self, num_classes=7, backbone_name='efficientvit_b1.r224_in1k', pretrained=True, 
                  in_channels=3, masking_ratio=0.5):
         super(DualPath_SemFusion, self).__init__()
-        
-        # === Semantic-Aware Partial Attention ===
-        self.semantic_attention = SemanticAwarePartialAttention(masking_ratio=masking_ratio)
         
         # === Backbone ===
         self.backbone = create_model(backbone_name, pretrained=pretrained, features_only=True, in_chans=in_channels)
@@ -95,7 +94,6 @@ class DualPath_SemFusion(nn.Module):
         self.cross_level_fusion = CrossLevelDualGatedAttention(dim=self.feature_dim)
 
         # === Final Attention and Classifier ===
-        
         self.se_fusion = CrossLevelSEBlock(in_channels=self.feature_dim * 2)
         self.global_pool = nn.AdaptiveAvgPool2d(1)
         self.dropout = nn.Dropout(0.3)
@@ -105,9 +103,6 @@ class DualPath_SemFusion(nn.Module):
     def forward(self, x):
         feat = self.backbone(x)[-1]  # [B, C, H, W]
         B, C, H, W = feat.shape
-
-        # === Apply Semantic Partial Attention ===
-        feat = self.semantic_attention(feat)
 
         # === Local Pathway ===
         local_feat = self.local_branch(feat)                   # [B, H*W, C]
